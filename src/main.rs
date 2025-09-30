@@ -30,7 +30,7 @@ enum Commands {
         concurrent: usize,
 
         /// Run in headless mode
-        #[arg(long, default_value_t = true)]
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         headless: bool,
 
         /// Rate limit per hour
@@ -156,7 +156,7 @@ async fn main() -> Result<()> {
             // Convert results to IPTUResult
             let now = chrono::Utc::now().to_rfc3339();
             let iptu_results: Vec<IPTUResult> = results.iter().map(|r| IPTUResult {
-                id: None,
+                id: Some(uuid::Uuid::new_v4().to_string()),
                 contributor_number: r.contributor_number.clone(),
                 numero_cadastro: r.numero_cadastro.clone(),
                 nome_proprietario: r.nome_proprietario.clone(),
