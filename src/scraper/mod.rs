@@ -120,10 +120,15 @@ impl ScraperEngine {
 
                 // Create a future for each job
                 let task = async move {
-                    // Add a small random delay to stagger the starts slightly
+                    // Add a random 2-3 second delay multiplied by the index to stagger starts
+                    // First job starts immediately, second after 2-3s, third after 4-6s, etc.
                     let mut rng = rand::thread_rng();
-                    let initial_delay = rng.gen_range(0..=1000);
-                    sleep(Duration::from_millis(initial_delay)).await;
+                    let base_delay = rng.gen_range(2000..=3000); // Random 2-3 seconds
+                    let stagger_delay = (i as u64) * base_delay;
+                    if stagger_delay > 0 {
+                        tracing::info!("Waiting {}ms before starting job: {}", stagger_delay, number);
+                        sleep(Duration::from_millis(stagger_delay)).await;
+                    }
 
                     tracing::info!("Processing job: {}", number);
 
