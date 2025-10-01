@@ -129,55 +129,75 @@ async fn main() -> Result<()> {
             let batch_id_clone = batch_id.clone();
             let client_arc = Arc::new(client);
             let client_for_callback = client_arc.clone();
+            let machine_id_clone = machine_id.clone();
 
-            let results = scraper.process_batch_with_rate_limit(
+            let results = scraper.process_batch_with_callback(
                 contributor_numbers.clone(),
-                move |completed, total| {
+                move |result: &scraper::ScraperResult, completed, total| {
                     info!("Progress: {}/{}", completed, total);
 
-                    // Upload results every 10 processed
-                    if completed % 10 == 0 && completed > 0 {
-                        let client = client_for_callback.clone();
-                        let batch_id = batch_id_clone.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = client.update_batch_progress(
-                                &batch_id,
-                                completed as i32,
-                                0, // We'll update this later
-                                0,
-                            ).await {
-                                tracing::error!("Failed to update batch progress: {}", e);
+                    // Upload each result immediately after processing
+                    let client = client_for_callback.clone();
+                    let batch_id = batch_id_clone.clone();
+                    let machine_id = machine_id_clone.clone();
+                    let result_clone = result.clone();
+
+                    tokio::spawn(async move {
+                        // Convert to Supabase format
+                        let now = chrono::Utc::now().to_rfc3339();
+                        let iptu_result = crate::supabase::IPTUResult {
+                            id: Some(uuid::Uuid::new_v4().to_string()),
+                            contributor_number: result_clone.contributor_number.clone(),
+                            numero_cadastro: result_clone.numero_cadastro.clone(),
+                            nome_proprietario: result_clone.nome_proprietario.clone(),
+                            nome_compromissario: result_clone.nome_compromissario.clone(),
+                            endereco: result_clone.endereco.clone(),
+                            numero: result_clone.numero.clone(),
+                            complemento: result_clone.complemento.clone(),
+                            bairro: result_clone.bairro.clone(),
+                            cep: result_clone.cep.clone(),
+                            sucesso: result_clone.success,
+                            erro: result_clone.error.clone(),
+                            batch_id: Some(batch_id.clone()),
+                            timestamp: now,
+                            processed_by: Some(machine_id.to_string()),
+                        };
+
+                        // Upload immediately
+                        if let Err(e) = client.upload_results(vec![iptu_result]).await {
+                            tracing::error!("Failed to upload result for {}: {}", result_clone.contributor_number, e);
+                        } else {
+                            tracing::info!("Successfully uploaded result for {}", result_clone.contributor_number);
+
+                            // Mark as success or error in iptus_list
+                            if result_clone.success && result_clone.nome_proprietario.is_some() {
+                                if let Err(e) = client.mark_iptu_list_as_success(vec![result_clone.contributor_number.clone()]).await {
+                                    tracing::error!("Failed to mark as success: {}", e);
+                                }
+                            } else if !result_clone.success {
+                                if let Err(e) = client.mark_iptu_list_as_error(vec![result_clone.contributor_number]).await {
+                                    tracing::error!("Failed to mark as error: {}", e);
+                                }
                             }
-                        });
-                    }
+                        }
+
+                        // Update batch progress
+                        if let Err(e) = client.update_batch_progress(
+                            &batch_id,
+                            completed as i32,
+                            if result_clone.success { 1 } else { 0 },
+                            if !result_clone.success { 1 } else { 0 },
+                        ).await {
+                            tracing::error!("Failed to update batch progress: {}", e);
+                        }
+                    });
                 }
             ).await;
 
-            // Convert results to IPTUResult
-            let now = chrono::Utc::now().to_rfc3339();
-            let iptu_results: Vec<IPTUResult> = results.iter().map(|r| IPTUResult {
-                id: Some(uuid::Uuid::new_v4().to_string()),
-                contributor_number: r.contributor_number.clone(),
-                numero_cadastro: r.numero_cadastro.clone(),
-                nome_proprietario: r.nome_proprietario.clone(),
-                nome_compromissario: r.nome_compromissario.clone(),
-                endereco: r.endereco.clone(),
-                numero: r.numero.clone(),
-                complemento: r.complemento.clone(),
-                bairro: r.bairro.clone(),
-                cep: r.cep.clone(),
-                sucesso: r.success,
-                erro: r.error.clone(),
-                batch_id: Some(batch_id.clone()),
-                timestamp: now.clone(),
-                processed_by: Some(machine_id.to_string()),
-            }).collect();
+            // All results have already been uploaded immediately after each scrape
+            info!("All results have been uploaded to Supabase");
 
-            // Upload results
-            info!("Uploading results...");
-            client_arc.upload_results(iptu_results.clone()).await?;
-
-            // Update batch progress
+            // Final batch update with totals
             let success_count = results.iter().filter(|r| r.success).count() as i32;
             let error_count = results.iter().filter(|r| !r.success).count() as i32;
 
@@ -187,25 +207,6 @@ async fn main() -> Result<()> {
                 success_count,
                 error_count,
             ).await?;
-
-            // Mark jobs as success/error
-            let success_numbers: Vec<String> = results.iter()
-                .filter(|r| r.success)
-                .map(|r| r.contributor_number.clone())
-                .collect();
-
-            let error_numbers: Vec<String> = results.iter()
-                .filter(|r| !r.success)
-                .map(|r| r.contributor_number.clone())
-                .collect();
-
-            if !success_numbers.is_empty() {
-                client_arc.mark_iptu_list_as_success(success_numbers).await?;
-            }
-
-            if !error_numbers.is_empty() {
-                client_arc.mark_iptu_list_as_error(error_numbers).await?;
-            }
 
             // Complete batch
             client_arc.complete_batch(&batch_id).await?;
