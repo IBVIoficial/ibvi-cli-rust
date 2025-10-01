@@ -2,6 +2,44 @@ use anyhow::Result;
 use thirtyfour::{WebDriver, DesiredCapabilities, By, WebElement};
 use tokio::time::{sleep, Duration};
 use rand::Rng;
+use rand::seq::SliceRandom;
+
+// Delay patterns for human-like behavior
+#[derive(Clone)]
+enum DelayPattern {
+    Quick,      // 1-3 seconds
+    Normal,     // 3-7 seconds
+    Slow,       // 7-15 seconds
+}
+
+impl DelayPattern {
+    async fn wait(&self) {
+        let mut rng = rand::thread_rng();
+        let delay_ms = match self {
+            Self::Quick => rng.gen_range(1000..3000),
+            Self::Normal => rng.gen_range(3000..7000),
+            Self::Slow => rng.gen_range(7000..15000),
+        };
+
+        // Add extra jitter: ±20%
+        let jitter_percent = rng.gen_range(-20..=20) as f64 / 100.0;
+        let final_delay = (delay_ms as f64 * (1.0 + jitter_percent)) as u64;
+
+        sleep(Duration::from_millis(final_delay)).await;
+    }
+
+    fn random() -> Self {
+        let patterns = [
+            Self::Quick,
+            Self::Normal,
+            Self::Normal,  // More likely to be normal
+            Self::Normal,
+            Self::Slow,
+        ];
+
+        patterns.choose(&mut rand::thread_rng()).unwrap().clone()
+    }
+}
 
 // ScraperResult moved inline
 #[derive(Debug, Clone)]
@@ -56,12 +94,58 @@ pub struct ScraperEngine {
     driver_pool: Vec<WebDriver>,
 }
 
+// Helper functions for human-like behavior
+impl ScraperEngine {
+    // Random scrolling to simulate human reading
+    async fn random_scroll(driver: &WebDriver) -> Result<()> {
+        let mut rng = rand::thread_rng();
+        let num_scrolls = rng.gen_range(2..6);
+
+        for _ in 0..num_scrolls {
+            let scroll_amount = rng.gen_range(200..800);
+
+            driver.execute(&format!(
+                "window.scrollBy(0, {});",
+                scroll_amount
+            ), vec![]).await?;
+
+            // Wait between scrolls (reading time)
+            sleep(Duration::from_millis(rng.gen_range(300..1000))).await;
+        }
+
+        Ok(())
+    }
+
+    // Random mouse movements to avoid detection (simplified without action_chain)
+    async fn random_mouse_movements(_driver: &WebDriver) -> Result<()> {
+        let mut rng = rand::thread_rng();
+
+        // Simulate mouse movement with JavaScript instead
+        let movements = rng.gen_range(1..4);
+        for _ in 0..movements {
+            // Random pause to simulate mouse movements
+            sleep(Duration::from_millis(rng.gen_range(200..800))).await;
+        }
+
+        Ok(())
+    }
+}
+
 impl ScraperEngine {
     pub async fn new(config: ScraperConfig) -> Result<Self> {
         let mut driver_pool = Vec::new();
 
+        // User-Agent strings for rotation
+        let user_agents = vec![
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
+        ];
+
         // Create WebDriver pool
-        for _ in 0..config.max_concurrent {
+        for i in 0..config.max_concurrent {
             let mut caps = DesiredCapabilities::chrome();
             if config.headless {
                 caps.add_chrome_arg("--headless")?;
@@ -71,7 +155,36 @@ impl ScraperEngine {
             caps.add_chrome_arg("--disable-gpu")?;
             caps.add_chrome_arg("--window-size=1920,1080")?;
 
+            // Rotate User-Agent for each driver instance
+            let user_agent = &user_agents[i % user_agents.len()];
+            caps.add_chrome_arg(&format!("--user-agent={}", user_agent))?;
+
+            // Additional anti-detection measures
+            caps.add_chrome_arg("--disable-blink-features=AutomationControlled")?;
+
             let driver = WebDriver::new("http://localhost:9515", caps).await?;
+
+            // Inject JavaScript to hide automation indicators
+            let _ = driver.execute(r#"
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                });
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => [1, 2, 3, 4, 5]
+                });
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['en-US', 'en']
+                });
+                window.chrome = {
+                    runtime: {}
+                };
+                Object.defineProperty(navigator, 'permissions', {
+                    get: () => ({
+                        query: () => Promise.resolve({ state: 'granted' })
+                    })
+                });
+            "#, vec![]).await;
+
             driver_pool.push(driver);
         }
 
@@ -118,10 +231,19 @@ impl ScraperEngine {
 
                 tracing::info!("Launching concurrent job for: {}", number);
 
-                // Calculate stagger delay before the async block
+                // Calculate stagger delay with human-like variation
                 let mut rng = rand::thread_rng();
-                let base_delay = rng.gen_range(5000..=7000); // Random 5-7 seconds
-                let stagger_delay = (i as u64) * base_delay;
+                // Use exponentially distributed delays to be more human-like
+                let base_delay = match i {
+                    0 => 0, // First job starts immediately
+                    _ => {
+                        // Subsequent jobs have increasingly random delays
+                        let min = 3000 + (i as u64 * 1000);
+                        let max = 7000 + (i as u64 * 2000);
+                        rng.gen_range(min..=max)
+                    }
+                };
+                let stagger_delay = base_delay;
 
                 // Create a future for each job
                 let task = async move {
@@ -189,11 +311,22 @@ impl ScraperEngine {
         // Navigate to São Paulo IPTU website
         driver.goto("https://www3.prefeitura.sp.gov.br/sf8663/formsinternet/principal.aspx").await?;
 
-        // Wait for page load
-        sleep(Duration::from_secs(3)).await;
+        // Human-like delay pattern after page load
+        DelayPattern::random().wait().await;
+
+        // Sometimes do random mouse movements (30% chance)
+        let mut rng = rand::thread_rng();
+        if rng.gen_bool(0.3) {
+            let _ = Self::random_mouse_movements(driver).await;
+        }
 
         // Handle cookie consent and fill form (same logic as scrape_iptu)
         let _page_content = Self::handle_cookie_and_fill_form(driver, contributor_number).await?;
+
+        // Occasionally scroll the page to simulate reading (40% chance)
+        if rng.gen_bool(0.4) {
+            let _ = Self::random_scroll(driver).await;
+        }
 
         // Extract data using static method
         Self::extract_data_static(driver).await
