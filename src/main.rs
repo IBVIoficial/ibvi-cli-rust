@@ -99,6 +99,12 @@ async fn main() -> Result<()> {
 
             info!("Found {} pending jobs", jobs.len());
 
+            // Check if jobs are from priority table
+            let from_priority_table = jobs.first().map(|j| j.from_priority_table).unwrap_or(false);
+            if from_priority_table {
+                info!("Processing priority jobs from iptus_list_priority table");
+            }
+
             // Extract contributor numbers and remove duplicates
             let mut contributor_numbers: Vec<String> = jobs.iter()
                 .map(|j| j.contributor_number.clone())
@@ -122,7 +128,7 @@ async fn main() -> Result<()> {
             // Claim the jobs
             info!("Claiming jobs...");
             let machine_id = "cli".to_string();
-            client.claim_jobs(contributor_numbers.clone(), &machine_id).await?;
+            client.claim_jobs(contributor_numbers.clone(), &machine_id, from_priority_table).await?;
 
             // Create batch
             let batch_id = client.create_batch(contributor_numbers.len() as i32).await?;
@@ -155,6 +161,7 @@ async fn main() -> Result<()> {
                     let batch_id = batch_id_clone.clone();
                     let machine_id = machine_id.clone();
                     let result_clone = result.clone();
+                    let from_priority = from_priority_table;
 
                     tokio::spawn(async move {
                         // Convert to Supabase format
@@ -183,13 +190,13 @@ async fn main() -> Result<()> {
                         } else {
                             tracing::info!("Successfully uploaded result for {}", result_clone.contributor_number);
 
-                            // Mark as success or error in iptus_list
+                            // Mark as success or error in the appropriate table
                             if result_clone.success && result_clone.nome_proprietario.is_some() {
-                                if let Err(e) = client.mark_iptu_list_as_success(vec![result_clone.contributor_number.clone()]).await {
+                                if let Err(e) = client.mark_iptu_list_as_success(vec![result_clone.contributor_number.clone()], from_priority).await {
                                     tracing::error!("Failed to mark as success: {}", e);
                                 }
                             } else if !result_clone.success {
-                                if let Err(e) = client.mark_iptu_list_as_error(vec![result_clone.contributor_number]).await {
+                                if let Err(e) = client.mark_iptu_list_as_error(vec![result_clone.contributor_number], from_priority).await {
                                     tracing::error!("Failed to mark as error: {}", e);
                                 }
                             }

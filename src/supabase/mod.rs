@@ -12,6 +12,8 @@ pub struct PendingJob {
     pub created_at: String,
     #[serde(default)]
     pub batch_id: Option<String>,
+    #[serde(skip)]
+    pub from_priority_table: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -68,10 +70,50 @@ impl SupabaseClient {
     }
 
     pub async fn fetch_pending_jobs(&self, limit: usize) -> Result<Vec<PendingJob>> {
-        let url = format!("{}/rest/v1/iptus_list", self.base_url);
-
         // Use service role key if available, otherwise use anon key
         let auth_key = self.service_role_key.as_ref().unwrap_or(&self.api_key);
+
+        // First try to fetch from iptus_list_priority
+        tracing::info!("Checking iptus_list_priority table for pending jobs...");
+        let priority_url = format!("{}/rest/v1/iptus_list_priority", self.base_url);
+
+        let priority_response = self.client
+            .get(&priority_url)
+            .header("apikey", auth_key)
+            .header("Authorization", format!("Bearer {}", auth_key))
+            .query(&[
+                ("select", "contributor_number,status"),
+                ("status", "is.null"),
+                ("order", "contributor_number.asc"),
+                ("limit", &limit.to_string()),
+            ])
+            .send()
+            .await?;
+
+        if priority_response.status().is_success() {
+            let text = priority_response.text().await?;
+            tracing::debug!("Response from iptus_list_priority: {}", text);
+
+            let mut priority_jobs = serde_json::from_str::<Vec<PendingJob>>(&text)
+                .map_err(|e| anyhow::anyhow!("Failed to parse priority response: {}. Response: {}", e, text))?;
+
+            if !priority_jobs.is_empty() {
+                tracing::info!("Found {} priority jobs in iptus_list_priority", priority_jobs.len());
+                // Mark these jobs as coming from priority table
+                for job in &mut priority_jobs {
+                    job.from_priority_table = true;
+                }
+                return Ok(priority_jobs);
+            } else {
+                tracing::info!("No pending jobs found in iptus_list_priority, checking iptus_list...");
+            }
+        } else {
+            let error_text = priority_response.text().await?;
+            tracing::warn!("Could not fetch from iptus_list_priority: {}", error_text);
+        }
+
+        // If no priority jobs or priority table doesn't exist, fetch from regular iptus_list
+        let url = format!("{}/rest/v1/iptus_list", self.base_url);
 
         let response = self.client
             .get(&url)
@@ -88,20 +130,27 @@ impl SupabaseClient {
 
         if !response.status().is_success() {
             let error_text = response.text().await?;
-            anyhow::bail!("Failed to fetch pending jobs: {}", error_text);
+            anyhow::bail!("Failed to fetch pending jobs from both tables: {}", error_text);
         }
 
         let text = response.text().await?;
-        tracing::debug!("Response from iptu_list: {}", text);
+        tracing::debug!("Response from iptus_list: {}", text);
 
         let jobs = serde_json::from_str::<Vec<PendingJob>>(&text)
             .map_err(|e| anyhow::anyhow!("Failed to parse response: {}. Response: {}", e, text))?;
 
+        if !jobs.is_empty() {
+            tracing::info!("Found {} jobs in iptus_list", jobs.len());
+        } else {
+            tracing::info!("No pending jobs found in either table");
+        }
+
         Ok(jobs)
     }
 
-    pub async fn claim_jobs(&self, job_ids: Vec<String>, _machine_id: &str) -> Result<()> {
-        let url = format!("{}/rest/v1/iptus_list", self.base_url);
+    pub async fn claim_jobs(&self, job_ids: Vec<String>, _machine_id: &str, from_priority_table: bool) -> Result<()> {
+        let table_name = if from_priority_table { "iptus_list_priority" } else { "iptus_list" };
+        let url = format!("{}/rest/v1/{}", self.base_url, table_name);
 
         // Use service role key if available, otherwise use anon key
         let auth_key = self.service_role_key.as_ref().unwrap_or(&self.api_key);
@@ -109,6 +158,8 @@ impl SupabaseClient {
         let update_data = serde_json::json!({
             "status": "p",  // p for processing
         });
+
+        tracing::info!("Claiming {} jobs from {}", job_ids.len(), table_name);
 
         for id in job_ids {
             self.client
@@ -232,8 +283,9 @@ impl SupabaseClient {
         Ok(())
     }
 
-    pub async fn mark_iptu_list_as_success(&self, contributor_numbers: Vec<String>) -> Result<()> {
-        let url = format!("{}/rest/v1/iptus_list", self.base_url);
+    pub async fn mark_iptu_list_as_success(&self, contributor_numbers: Vec<String>, from_priority_table: bool) -> Result<()> {
+        let table_name = if from_priority_table { "iptus_list_priority" } else { "iptus_list" };
+        let url = format!("{}/rest/v1/{}", self.base_url, table_name);
 
         // Use service role key if available, otherwise use anon key
         let auth_key = self.service_role_key.as_ref().unwrap_or(&self.api_key);
@@ -257,8 +309,9 @@ impl SupabaseClient {
         Ok(())
     }
 
-    pub async fn mark_iptu_list_as_error(&self, contributor_numbers: Vec<String>) -> Result<()> {
-        let url = format!("{}/rest/v1/iptus_list", self.base_url);
+    pub async fn mark_iptu_list_as_error(&self, contributor_numbers: Vec<String>, from_priority_table: bool) -> Result<()> {
+        let table_name = if from_priority_table { "iptus_list_priority" } else { "iptus_list" };
+        let url = format!("{}/rest/v1/{}", self.base_url, table_name);
 
         // Use service role key if available, otherwise use anon key
         let auth_key = self.service_role_key.as_ref().unwrap_or(&self.api_key);
