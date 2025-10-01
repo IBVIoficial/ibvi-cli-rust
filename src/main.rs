@@ -36,6 +36,14 @@ enum Commands {
         /// Rate limit per hour
         #[arg(short, long, default_value_t = 100)]
         rate_limit: usize,
+
+        /// File with contributor numbers (one per line)
+        #[arg(short, long)]
+        file: Option<String>,
+
+        /// Direct contributor numbers (comma-separated)
+        #[arg(long)]
+        numbers: Option<String>,
     },
 
     /// Fetch pending jobs from Supabase (without processing)
@@ -86,49 +94,77 @@ async fn main() -> Result<()> {
     }
 
     match cli.command {
-        Commands::Process { limit, concurrent, headless, rate_limit } => {
-            info!("Fetching {} pending jobs from Supabase...", limit);
+        Commands::Process { limit, concurrent, headless, rate_limit, file, numbers } => {
+            let mut contributor_numbers: Vec<String>;
+            let mut from_priority_table = false;
 
-            // Fetch pending jobs
-            let jobs = client.fetch_pending_jobs(limit).await?;
+            // Determine source of contributor numbers
+            if let Some(file_path) = file {
+                // Read from file
+                info!("Reading contributor numbers from file: {}", file_path);
+                let contents = std::fs::read_to_string(file_path)?;
+                contributor_numbers = contents.lines()
+                    .map(|line| line.trim().to_string())
+                    .filter(|line| !line.is_empty())
+                    .collect();
+                info!("Found {} contributor numbers in file", contributor_numbers.len());
+            } else if let Some(nums) = numbers {
+                // Parse from comma-separated string
+                info!("Processing provided contributor numbers");
+                contributor_numbers = nums.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                info!("Processing {} provided contributor numbers", contributor_numbers.len());
+            } else {
+                // Fetch from Supabase
+                info!("Fetching {} pending jobs from Supabase...", limit);
+                let jobs = client.fetch_pending_jobs(limit).await?;
 
-            if jobs.is_empty() {
-                info!("No pending jobs found");
-                return Ok(());
+                if jobs.is_empty() {
+                    info!("No pending jobs found");
+                    return Ok(());
+                }
+
+                info!("Found {} pending jobs", jobs.len());
+
+                // Check if jobs are from priority table
+                from_priority_table = jobs.first().map(|j| j.from_priority_table).unwrap_or(false);
+                if from_priority_table {
+                    info!("Processing priority jobs from iptus_list_priority table");
+                }
+
+                // Extract contributor numbers
+                contributor_numbers = jobs.iter()
+                    .map(|j| j.contributor_number.clone())
+                    .collect();
+
+                // Claim the jobs
+                info!("Claiming jobs...");
+                let machine_id = "cli".to_string();
+                client.claim_jobs(contributor_numbers.clone(), &machine_id, from_priority_table).await?;
             }
-
-            info!("Found {} pending jobs", jobs.len());
-
-            // Check if jobs are from priority table
-            let from_priority_table = jobs.first().map(|j| j.from_priority_table).unwrap_or(false);
-            if from_priority_table {
-                info!("Processing priority jobs from iptus_list_priority table");
-            }
-
-            // Extract contributor numbers and remove duplicates
-            let mut contributor_numbers: Vec<String> = jobs.iter()
-                .map(|j| j.contributor_number.clone())
-                .collect();
 
             // Remove duplicates while preserving order
             let mut seen = std::collections::HashSet::new();
+            let original_count = contributor_numbers.len();
             contributor_numbers.retain(|item| seen.insert(item.clone()));
 
-            if contributor_numbers.len() != jobs.len() {
+            if contributor_numbers.len() != original_count {
                 warn!("Found {} duplicate jobs, processing {} unique jobs",
-                    jobs.len() - contributor_numbers.len(),
+                    original_count - contributor_numbers.len(),
                     contributor_numbers.len());
+            }
+
+            if contributor_numbers.is_empty() {
+                info!("No contributor numbers to process");
+                return Ok(());
             }
 
             // Log the contributor numbers
             for (idx, num) in contributor_numbers.iter().enumerate() {
                 info!("Job {}: {}", idx + 1, num);
             }
-
-            // Claim the jobs
-            info!("Claiming jobs...");
-            let machine_id = "cli".to_string();
-            client.claim_jobs(contributor_numbers.clone(), &machine_id, from_priority_table).await?;
 
             // Create batch
             let batch_id = client.create_batch(contributor_numbers.len() as i32).await?;
@@ -159,7 +195,6 @@ async fn main() -> Result<()> {
                     // Upload each result immediately after processing
                     let client = client_for_callback.clone();
                     let batch_id = batch_id_clone.clone();
-                    let machine_id = machine_id.clone();
                     let result_clone = result.clone();
                     let from_priority = from_priority_table;
 
@@ -181,7 +216,7 @@ async fn main() -> Result<()> {
                             erro: result_clone.error.clone(),
                             batch_id: Some(batch_id.clone()),
                             timestamp: now,
-                            processed_by: Some(machine_id.to_string()),
+                            processed_by: Some("cli".to_string()),
                         };
 
                         // Upload immediately
