@@ -56,15 +56,8 @@ impl ScraperEngine {
             caps.add_chrome_arg("--disable-dev-shm-usage")?;
             caps.add_chrome_arg("--disable-gpu")?;
             caps.add_chrome_arg("--window-size=1920,1080")?;
-            caps.add_chrome_arg("--disable-blink-features=AutomationControlled")?;
 
             let driver = WebDriver::new("http://localhost:9515", caps).await?;
-
-            // Set timeouts - increased to handle slow pages
-            driver.set_page_load_timeout(std::time::Duration::from_secs(60)).await?;
-            driver.set_script_timeout(std::time::Duration::from_secs(60)).await?;
-            driver.set_implicit_wait_timeout(std::time::Duration::from_secs(10)).await?;
-
             driver_pool.push(driver);
         }
 
@@ -130,46 +123,22 @@ impl ScraperEngine {
     }
 
     async fn scrape_iptu(&self, driver: &WebDriver, contributor_number: &str) -> Result<IPTUData> {
+        tracing::info!("Starting scrape for: {}", contributor_number);
+
         // Navigate to São Paulo IPTU website
-        driver.goto("https://www3.prefeitura.sp.gov.br/sf8663/formsinternet/principal.aspx").await?;
+        driver.goto("https://www.prefeitura.sp.gov.br/sf8663/formsinternet/principal.aspx").await?;
 
         // Wait for page load
         sleep(Duration::from_secs(3)).await;
 
-        // Dismiss any modals/overlays using JavaScript
-        let dismiss_modals_script = r#"
-            // Close any modals or overlays
-            var modals = document.querySelectorAll('[role="dialog"], .modal, [class*="modal"], [class*="overlay"]');
-            modals.forEach(function(modal) {
-                modal.style.display = 'none';
-                modal.remove();
-            });
-
-            // Click any accept/continue buttons in modals
-            var buttons = document.querySelectorAll('button, a');
-            buttons.forEach(function(btn) {
-                var text = btn.textContent.toLowerCase();
-                if (text.includes('aceitar') || text.includes('continuar') ||
-                    text.includes('prosseguir') || text.includes('autorizo') ||
-                    text.includes('accept') || text.includes('continue')) {
-                    try {
-                        btn.click();
-                    } catch(e) {}
-                }
-            });
-
-            return true;
-        "#;
-
-        match driver.execute(dismiss_modals_script, vec![]).await {
-            Ok(_) => tracing::info!("Modals dismissed successfully"),
-            Err(e) => tracing::warn!("Failed to dismiss modals: {}", e),
+        // Handle cookie consent modal if present
+        if let Ok(consent_button) = driver.find(By::Css("button:contains('Autorizo o uso de todos os cookies')")).await {
+            let _ = consent_button.click().await;
+            sleep(Duration::from_secs(2)).await;
         }
-        sleep(Duration::from_secs(1)).await;
 
         // Parse contributor number (remove dots and dashes)
         let parts = contributor_number.replace(".", "").replace("-", "").trim().to_string();
-        tracing::info!("Processing contributor number: {} -> {}", contributor_number, parts);
 
         if parts.len() < 11 {
             anyhow::bail!("Número de cadastro inválido");
@@ -189,21 +158,45 @@ impl ScraperEngine {
         inputs[3].send_keys(&parts[10..11]).await?;
 
         // Wait a bit for any dynamic content to load
-        sleep(Duration::from_secs(1)).await;
+        sleep(Duration::from_secs(2)).await;
 
-        // Dismiss modals again before clicking submit
-        let _ = driver.execute(dismiss_modals_script, vec![]).await;
-        sleep(Duration::from_millis(500)).await;
+        // Try to dismiss cookie consent modal if it appears
+        // Look for common accept/continue buttons in the modal
+        let cookie_selectors = vec![
+            "button[class*='aceitar']",
+            "button[class*='continuar']",
+            "button[class*='accept']",
+            "button[class*='continue']",
+            "//button[contains(text(), 'Aceitar')]",
+            "//button[contains(text(), 'Continuar')]",
+            "//button[contains(text(), 'Prosseguir')]",
+        ];
+
+        for selector in cookie_selectors {
+            if selector.starts_with("//") {
+                // XPath selector
+                if let Ok(button) = driver.find(By::XPath(selector)).await {
+                    if let Ok(_) = button.click().await {
+                        tracing::info!("Clicked cookie consent button");
+                        sleep(Duration::from_millis(500)).await;
+                        break;
+                    }
+                }
+            } else {
+                // CSS selector
+                if let Ok(button) = driver.find(By::Css(selector)).await {
+                    if let Ok(_) = button.click().await {
+                        tracing::info!("Clicked cookie consent button");
+                        sleep(Duration::from_millis(500)).await;
+                        break;
+                    }
+                }
+            }
+        }
 
         // Submit form - use JavaScript click to bypass overlay issues
+        // Execute JavaScript directly instead of trying to click the element
         let click_script = r#"
-            // First, try to remove any overlays blocking the button
-            var overlays = document.querySelectorAll('[class*="overlay"], [class*="modal"], [style*="z-index"]');
-            overlays.forEach(function(overlay) {
-                overlay.remove();
-            });
-
-            // Now click the button
             var btn = document.getElementById('_BtnAvancarDasii');
             if (btn) {
                 btn.click();
@@ -212,8 +205,17 @@ impl ScraperEngine {
             return false;
         "#;
 
-        let click_result = driver.execute(click_script, vec![]).await;
-        tracing::info!("Form submit result: {:?}", click_result);
+        match driver.execute(click_script, vec![]).await {
+            Ok(result) => {
+                tracing::info!("Form submitted via JavaScript click: {:?}", result);
+            }
+            Err(e) => {
+                tracing::warn!("JavaScript click failed: {}, trying regular click", e);
+                // Fallback to finding and clicking the element
+                let submit_button = driver.find(By::Id("_BtnAvancarDasii")).await?;
+                submit_button.click().await?;
+            }
+        }
 
         // Wait for results page to load
         sleep(Duration::from_secs(5)).await;
@@ -230,6 +232,16 @@ impl ScraperEngine {
 
         // Save page source for debugging
         tracing::debug!("Page loaded, extracting data...");
+
+        // Save HTML to file for inspection (temporary debug)
+        if let Ok(home) = std::env::var("HOME") {
+            let debug_file = format!("{}/Desktop/iptu_debug_{}.html", home, contributor_number.replace(".", ""));
+            if let Err(e) = std::fs::write(&debug_file, &page_content) {
+                tracing::warn!("Could not save debug HTML: {}", e);
+            } else {
+                tracing::info!("Debug HTML saved to: {}", debug_file);
+            }
+        }
 
         // Extract data
         let data = self.extract_data(driver).await?;
