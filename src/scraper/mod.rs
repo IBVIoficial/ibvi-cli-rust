@@ -194,25 +194,61 @@ impl ScraperEngine {
         }
 
         // Find all text input fields
+        tracing::info!("Looking for form input fields...");
         let inputs = driver.find_all(By::Css("input[type='text']")).await?;
 
+        tracing::info!("Found {} input fields", inputs.len());
         if inputs.len() < 4 {
-            anyhow::bail!("Campos de entrada não encontrados");
+            anyhow::bail!("Campos de entrada não encontrados - found only {} inputs", inputs.len());
         }
 
-        // Fill in the contributor number in 4 parts
+        // Clear fields first, then fill in the contributor number in 4 parts
+        tracing::info!("Filling contributor number: {}", parts);
+
+        // Clear and fill field 1 (first 3 digits)
+        inputs[0].clear().await?;
         inputs[0].send_keys(&parts[0..3]).await?;
+        tracing::info!("Filled field 1: {}", &parts[0..3]);
+
+        // Clear and fill field 2 (next 3 digits)
+        inputs[1].clear().await?;
         inputs[1].send_keys(&parts[3..6]).await?;
+        tracing::info!("Filled field 2: {}", &parts[3..6]);
+
+        // Clear and fill field 3 (next 4 digits)
+        inputs[2].clear().await?;
         inputs[2].send_keys(&parts[6..10]).await?;
+        tracing::info!("Filled field 3: {}", &parts[6..10]);
+
+        // Clear and fill field 4 (last digit - check digit)
+        inputs[3].clear().await?;
         inputs[3].send_keys(&parts[10..11]).await?;
+        tracing::info!("Filled field 4: {}", &parts[10..11]);
 
         // Wait a bit for any dynamic content to load
         sleep(Duration::from_secs(2)).await;
 
-        // Submit form - use JavaScript click to bypass overlay issues
+        // Submit form - try multiple methods
         tracing::info!("Submitting form...");
 
-        // Execute JavaScript directly instead of trying to click the element
+        // First, try to verify the form has been filled
+        let verify_script = r#"
+            var inputs = document.querySelectorAll("input[type='text']");
+            var values = [];
+            for(var i = 0; i < Math.min(4, inputs.length); i++) {
+                values.push(inputs[i].value);
+            }
+            return values.join('');
+        "#;
+
+        if let Ok(filled_values) = driver.execute(verify_script, vec![]).await {
+            tracing::info!("Form values before submit: {:?}", filled_values);
+        }
+
+        // Try multiple methods to submit the form
+        let mut submitted = false;
+
+        // Method 1: JavaScript click
         let click_script = r#"
             var btn = document.getElementById('_BtnAvancarDasii');
             if (btn) {
@@ -225,17 +261,42 @@ impl ScraperEngine {
         match driver.execute(click_script, vec![]).await {
             Ok(result) => {
                 tracing::info!("Form submitted via JavaScript click: {:?}", result);
+                submitted = true;
             }
             Err(e) => {
-                tracing::warn!("JavaScript click failed: {}, trying regular click", e);
-                // Fallback to finding and clicking the element
-                if let Ok(submit_button) = driver.find(By::Id("_BtnAvancarDasii")).await {
-                    submit_button.click().await?;
+                tracing::warn!("JavaScript click failed: {}", e);
+            }
+        }
+
+        // Method 2: Direct element click
+        if !submitted {
+            if let Ok(submit_button) = driver.find(By::Id("_BtnAvancarDasii")).await {
+                if submit_button.click().await.is_ok() {
                     tracing::info!("Form submitted via direct click");
-                } else {
-                    anyhow::bail!("Could not find submit button");
+                    submitted = true;
                 }
             }
+        }
+
+        // Method 3: Form submit via JavaScript
+        if !submitted {
+            let form_submit = r#"
+                var forms = document.forms;
+                if (forms.length > 0) {
+                    forms[0].submit();
+                    return true;
+                }
+                return false;
+            "#;
+
+            if let Ok(_) = driver.execute(form_submit, vec![]).await {
+                tracing::info!("Form submitted via form.submit()");
+                submitted = true;
+            }
+        }
+
+        if !submitted {
+            anyhow::bail!("Could not submit form after trying multiple methods");
         }
 
         // Wait for results page to load
