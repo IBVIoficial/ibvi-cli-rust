@@ -125,9 +125,9 @@ impl ScraperEngine {
 
                 results.push(scraper_result);
 
-                // Add random delay between 2-5 seconds to avoid being detected as bot
+                // Add random delay between 2-3 seconds to avoid being detected as bot
                 let mut rng = rand::thread_rng();
-                let random_delay = rng.gen_range(2000..=5000); // 2 to 5 seconds in milliseconds
+                let random_delay = rng.gen_range(2000..=3000); // 2 to 5 seconds in milliseconds
                 tracing::info!("Waiting {}ms before next request", random_delay);
                 sleep(Duration::from_millis(random_delay)).await;
 
