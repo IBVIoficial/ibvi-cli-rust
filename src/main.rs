@@ -117,8 +117,8 @@ async fn main() -> Result<()> {
             let config = ScraperConfig {
                 max_concurrent: concurrent,
                 headless,
-                timeout_secs: 30,
-                retry_attempts: 3,
+                timeout_secs: 60,
+                retry_attempts: 4,
                 rate_limit_per_hour: rate_limit,
             };
 
