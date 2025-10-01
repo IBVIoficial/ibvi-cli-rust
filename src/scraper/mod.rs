@@ -19,6 +19,19 @@ pub struct ScraperResult {
     pub error: Option<String>,
 }
 
+// Data structure for IPTU information
+#[derive(Debug, Default)]
+struct IPTUData {
+    numero_cadastro: Option<String>,
+    nome_proprietario: Option<String>,
+    nome_compromissario: Option<String>,
+    endereco: Option<String>,
+    numero: Option<String>,
+    complemento: Option<String>,
+    bairro: Option<String>,
+    cep: Option<String>,
+}
+
 pub struct ScraperConfig {
     pub max_concurrent: usize,
     pub headless: bool,
@@ -87,61 +100,84 @@ impl ScraperEngine {
         }
 
         // Calculate delay between requests to respect rate limit
-        let delay_ms = if self.config.rate_limit_per_hour > 0 {
+        let _delay_ms = if self.config.rate_limit_per_hour > 0 {
             (3600 * 1000) / self.config.rate_limit_per_hour as u64
         } else {
             0
         };
 
-        for chunk in jobs.chunks(self.config.max_concurrent) {
+        use futures::future::join_all;
 
+        for chunk in jobs.chunks(self.config.max_concurrent) {
+            let mut tasks = Vec::new();
+
+            // Launch all jobs in this chunk concurrently
             for (i, contributor_number) in chunk.iter().enumerate() {
-                let driver = &self.driver_pool[i];
+                let driver = self.driver_pool[i].clone();
                 let number = contributor_number.clone();
 
-                tracing::info!("Processing job {}/{}: {}", completed + 1, total, number);
+                tracing::info!("Launching concurrent job for: {}", number);
 
-                // Process job
-                let result = self.scrape_iptu(driver, &number).await;
+                // Create a future for each job
+                let task = async move {
+                    // Add a small random delay to stagger the starts slightly
+                    let mut rng = rand::thread_rng();
+                    let initial_delay = rng.gen_range(0..=1000);
+                    sleep(Duration::from_millis(initial_delay)).await;
 
-                let scraper_result = ScraperResult {
-                    contributor_number: number,
-                    numero_cadastro: result.as_ref().ok().and_then(|r| r.numero_cadastro.clone()),
-                    nome_proprietario: result.as_ref().ok().and_then(|r| r.nome_proprietario.clone()),
-                    nome_compromissario: result.as_ref().ok().and_then(|r| r.nome_compromissario.clone()),
-                    endereco: result.as_ref().ok().and_then(|r| r.endereco.clone()),
-                    numero: result.as_ref().ok().and_then(|r| r.numero.clone()),
-                    complemento: result.as_ref().ok().and_then(|r| r.complemento.clone()),
-                    bairro: result.as_ref().ok().and_then(|r| r.bairro.clone()),
-                    cep: result.as_ref().ok().and_then(|r| r.cep.clone()),
-                    success: result.is_ok(),
-                    error: result.err().map(|e| e.to_string()),
+                    tracing::info!("Processing job: {}", number);
+
+                    // Process job using the static scrape function
+                    let result = Self::scrape_iptu_static(&driver, &number).await;
+
+                    let scraper_result = ScraperResult {
+                        contributor_number: number.clone(),
+                        numero_cadastro: result.as_ref().ok().and_then(|r| r.numero_cadastro.clone()),
+                        nome_proprietario: result.as_ref().ok().and_then(|r| r.nome_proprietario.clone()),
+                        nome_compromissario: result.as_ref().ok().and_then(|r| r.nome_compromissario.clone()),
+                        endereco: result.as_ref().ok().and_then(|r| r.endereco.clone()),
+                        numero: result.as_ref().ok().and_then(|r| r.numero.clone()),
+                        complemento: result.as_ref().ok().and_then(|r| r.complemento.clone()),
+                        bairro: result.as_ref().ok().and_then(|r| r.bairro.clone()),
+                        cep: result.as_ref().ok().and_then(|r| r.cep.clone()),
+                        success: result.is_ok(),
+                        error: result.err().map(|e| e.to_string()),
+                    };
+
+                    (number, scraper_result)
                 };
 
-                completed += 1;
+                tasks.push(task);
+            }
 
-                // Call the callback with the result immediately
+            // Wait for all tasks in the chunk to complete
+            let chunk_results = join_all(tasks).await;
+
+            // Process results and call callbacks
+            for (number, scraper_result) in chunk_results {
+                completed += 1;
+                tracing::info!("Completed job {}/{}: {}", completed, total, number);
+
+                // Call the callback with the result
                 callback(&scraper_result, completed, total);
 
                 results.push(scraper_result);
+            }
 
-                // Add random delay between 2-3 seconds to avoid being detected as bot
+            // Add delay between chunks to avoid overwhelming the server
+            if chunk.len() == self.config.max_concurrent && completed < total {
                 let mut rng = rand::thread_rng();
-                let random_delay = rng.gen_range(2000..=3000); // 2 to 5 seconds in milliseconds
-                tracing::info!("Waiting {}ms before next request", random_delay);
-                sleep(Duration::from_millis(random_delay)).await;
-
-                // Additional rate limiting if configured
-                if delay_ms > 0 {
-                    sleep(Duration::from_millis(delay_ms)).await;
-                }
+                let chunk_delay = rng.gen_range(3000..=5000);
+                tracing::info!("Waiting {}ms before processing next chunk", chunk_delay);
+                sleep(Duration::from_millis(chunk_delay)).await;
             }
         }
 
         results
     }
 
-    async fn scrape_iptu(&self, driver: &WebDriver, contributor_number: &str) -> Result<IPTUData> {
+    // Static version for concurrent processing
+    async fn scrape_iptu_static(driver: &WebDriver, contributor_number: &str) -> Result<IPTUData> {
         tracing::info!("Starting scrape for: {}", contributor_number);
 
         // Navigate to São Paulo IPTU website
@@ -150,10 +186,17 @@ impl ScraperEngine {
         // Wait for page load
         sleep(Duration::from_secs(3)).await;
 
-        // Handle cookie consent modal with multiple attempts
+        // Handle cookie consent and fill form (same logic as scrape_iptu)
+        let _page_content = Self::handle_cookie_and_fill_form(driver, contributor_number).await?;
+
+        // Extract data using static method
+        Self::extract_data_static(driver).await
+    }
+
+    async fn handle_cookie_and_fill_form(driver: &WebDriver, contributor_number: &str) -> Result<String> {
+        // Cookie handling logic (extracted from scrape_iptu)
         tracing::info!("Looking for cookie consent modal...");
 
-        // Wait a bit for modal to appear
         sleep(Duration::from_secs(2)).await;
 
         let mut cookie_handled = false;
@@ -162,16 +205,12 @@ impl ScraperEngine {
         for attempt in 1..=max_attempts {
             tracing::info!("Cookie consent attempt {}/{}", attempt, max_attempts);
 
-            // Method 1: Direct JavaScript execution to click the button
             let js_direct_click = r#"
-                // Find all elements that might be the cookie button
                 var buttons = document.querySelectorAll('input[type="button"], button');
                 var clicked = false;
-
                 for (var i = 0; i < buttons.length; i++) {
                     var btn = buttons[i];
                     var text = (btn.value || btn.textContent || '').toLowerCase();
-
                     if (text.includes('autorizo') && text.includes('cookies')) {
                         console.log('Found cookie button:', btn);
                         btn.click();
@@ -179,81 +218,42 @@ impl ScraperEngine {
                         break;
                     }
                 }
-
                 if (!clicked) {
-                    // Try by class name
                     var cookieBtn = document.querySelector('input.cc__button__autorizacao--all');
                     if (cookieBtn) {
                         cookieBtn.click();
                         clicked = true;
                     }
                 }
-
                 return clicked;
             "#;
 
-            match driver.execute(js_direct_click, vec![]).await {
-                Ok(result) => {
-                    tracing::info!("JavaScript cookie consent result: {:?}", result);
+            if let Ok(result) = driver.execute(js_direct_click, vec![]).await {
+                tracing::info!("JavaScript cookie consent result: {:?}", result);
+                sleep(Duration::from_secs(2)).await;
 
-                    // Wait and check if modal is gone
-                    sleep(Duration::from_secs(2)).await;
-
-                    // Verify the modal is gone
-                    let check_modal = r#"
-                        var buttons = document.querySelectorAll('input[type="button"]');
-                        for (var i = 0; i < buttons.length; i++) {
-                            var text = (buttons[i].value || '').toLowerCase();
-                            if (text.includes('autorizo') && text.includes('cookies')) {
-                                return true; // Modal still present
-                            }
-                        }
-                        return false; // Modal gone
-                    "#;
-
-                    if let Ok(modal_present) = driver.execute(check_modal, vec![]).await {
-                        tracing::info!("Modal still present: {:?}", modal_present);
-
-                        // Check if the result indicates modal is gone (returns false)
-                        let modal_gone = format!("{:?}", modal_present).contains("false");
-
-                        if modal_gone {
-                            tracing::info!("Cookie modal successfully dismissed!");
-                            cookie_handled = true;
-                            break;
+                let check_modal = r#"
+                    var buttons = document.querySelectorAll('input[type="button"]');
+                    for (var i = 0; i < buttons.length; i++) {
+                        var text = (buttons[i].value || '').toLowerCase();
+                        if (text.includes('autorizo') && text.includes('cookies')) {
+                            return true;
                         }
                     }
-                }
-                Err(e) => {
-                    tracing::warn!("JavaScript execution failed: {}", e);
-                }
-            }
+                    return false;
+                "#;
 
-            // Method 2: Try WebDriver click as fallback
-            if !cookie_handled {
-                let selectors = vec![
-                    "input.cc__button__autorizacao--all",
-                    "input[value*='Autorizo o uso']",
-                ];
-
-                for selector in selectors {
-                    if let Ok(button) = driver.find(By::Css(selector)).await {
-                        tracing::info!("Found button with selector: {}, attempting click", selector);
-                        if button.click().await.is_ok() {
-                            sleep(Duration::from_secs(2)).await;
-                            cookie_handled = true;
-                            break;
-                        }
+                if let Ok(modal_present) = driver.execute(check_modal, vec![]).await {
+                    let modal_gone = format!("{:?}", modal_present).contains("false");
+                    if modal_gone {
+                        tracing::info!("Cookie modal successfully dismissed!");
+                        cookie_handled = true;
+                        break;
                     }
                 }
             }
 
-            if cookie_handled {
-                break;
-            }
-
-            if attempt < max_attempts {
-                tracing::warn!("Cookie modal not dismissed, retrying...");
+            if attempt < max_attempts && !cookie_handled {
                 sleep(Duration::from_secs(1)).await;
             }
         }
@@ -261,72 +261,45 @@ impl ScraperEngine {
         if cookie_handled {
             tracing::info!("Cookie consent handled successfully");
         } else {
-            tracing::warn!("Could not dismiss cookie modal after {} attempts, continuing anyway", max_attempts);
+            tracing::warn!("Could not dismiss cookie modal, continuing anyway");
         }
 
-        // Parse contributor number (remove dots and dashes)
+        // Fill form logic
         let parts = contributor_number.replace(".", "").replace("-", "").trim().to_string();
-
         if parts.len() < 11 {
             anyhow::bail!("Número de cadastro inválido");
         }
 
-        // Find all text input fields
         tracing::info!("Looking for form input fields...");
         let inputs = driver.find_all(By::Css("input[type='text']")).await?;
-
         tracing::info!("Found {} input fields", inputs.len());
+
         if inputs.len() < 4 {
-            anyhow::bail!("Campos de entrada não encontrados - found only {} inputs", inputs.len());
+            anyhow::bail!("Campos de entrada não encontrados");
         }
 
-        // Clear fields first, then fill in the contributor number in 4 parts
         tracing::info!("Filling contributor number: {}", parts);
-
-        // Clear and fill field 1 (first 3 digits)
         inputs[0].clear().await?;
         inputs[0].send_keys(&parts[0..3]).await?;
         tracing::info!("Filled field 1: {}", &parts[0..3]);
 
-        // Clear and fill field 2 (next 3 digits)
         inputs[1].clear().await?;
         inputs[1].send_keys(&parts[3..6]).await?;
         tracing::info!("Filled field 2: {}", &parts[3..6]);
 
-        // Clear and fill field 3 (next 4 digits)
         inputs[2].clear().await?;
         inputs[2].send_keys(&parts[6..10]).await?;
         tracing::info!("Filled field 3: {}", &parts[6..10]);
 
-        // Clear and fill field 4 (last digit - check digit)
         inputs[3].clear().await?;
         inputs[3].send_keys(&parts[10..11]).await?;
         tracing::info!("Filled field 4: {}", &parts[10..11]);
 
-        // Wait a bit for any dynamic content to load
         sleep(Duration::from_secs(2)).await;
 
-        // Submit form - try multiple methods
+        // Submit form
         tracing::info!("Submitting form...");
 
-        // First, try to verify the form has been filled
-        let verify_script = r#"
-            var inputs = document.querySelectorAll("input[type='text']");
-            var values = [];
-            for(var i = 0; i < Math.min(4, inputs.length); i++) {
-                values.push(inputs[i].value);
-            }
-            return values.join('');
-        "#;
-
-        if let Ok(filled_values) = driver.execute(verify_script, vec![]).await {
-            tracing::info!("Form values before submit: {:?}", filled_values);
-        }
-
-        // Try multiple methods to submit the form
-        let mut submitted = false;
-
-        // Method 1: JavaScript click
         let click_script = r#"
             var btn = document.getElementById('_BtnAvancarDasii');
             if (btn) {
@@ -336,202 +309,118 @@ impl ScraperEngine {
             return false;
         "#;
 
-        match driver.execute(click_script, vec![]).await {
-            Ok(result) => {
-                tracing::info!("Form submitted via JavaScript click: {:?}", result);
-                submitted = true;
-            }
-            Err(e) => {
-                tracing::warn!("JavaScript click failed: {}", e);
-            }
+        if let Ok(result) = driver.execute(click_script, vec![]).await {
+            tracing::info!("Form submitted via JavaScript click: {:?}", result);
         }
 
-        // Method 2: Direct element click
-        if !submitted {
-            if let Ok(submit_button) = driver.find(By::Id("_BtnAvancarDasii")).await {
-                if submit_button.click().await.is_ok() {
-                    tracing::info!("Form submitted via direct click");
-                    submitted = true;
-                }
-            }
-        }
-
-        // Method 3: Form submit via JavaScript
-        if !submitted {
-            let form_submit = r#"
-                var forms = document.forms;
-                if (forms.length > 0) {
-                    forms[0].submit();
-                    return true;
-                }
-                return false;
-            "#;
-
-            if let Ok(_) = driver.execute(form_submit, vec![]).await {
-                tracing::info!("Form submitted via form.submit()");
-                submitted = true;
-            }
-        }
-
-        if !submitted {
-            anyhow::bail!("Could not submit form after trying multiple methods");
-        }
-
-        // Wait for results page to load
         tracing::info!("Waiting for results page to load...");
         sleep(Duration::from_secs(8)).await;
 
-        // Check if we're on the data page
         let page_content = driver.source().await?;
         let current_url = driver.current_url().await?;
         tracing::info!("Current URL after form submit: {}", current_url);
 
-        // Check for various indicators that we're on the results page
-        let is_results_page = page_content.contains("DADOS DO IMÓVEL")
-            || page_content.contains("Dados do Imóvel")
-            || page_content.contains("Proprietário")
-            || page_content.contains("txtProprietarioNome")
-            || page_content.contains("txtNumeroCadastro");
-
-        if !is_results_page {
-            // Check if we're still on the form page (error occurred)
-            if page_content.contains("_BtnAvancarDasii") {
-                tracing::error!("Still on form page - submission may have failed");
-                anyhow::bail!("Form submission failed - still on form page");
-            }
-
-            tracing::error!("Page does not contain expected content markers");
-            tracing::error!("Page length: {} bytes", page_content.len());
-            anyhow::bail!("Página de dados não carregada");
-        }
-
-        tracing::info!("Results page loaded successfully");
-
-        // Save page source for debugging
-        tracing::debug!("Page loaded, extracting data...");
-
-        // Save HTML to file for inspection (temporary debug)
+        // Save debug HTML
         if let Ok(home) = std::env::var("HOME") {
             let debug_file = format!("{}/Desktop/iptu_debug_{}.html", home, contributor_number.replace(".", ""));
-            if let Err(e) = std::fs::write(&debug_file, &page_content) {
-                tracing::warn!("Could not save debug HTML: {}", e);
-            } else {
+            if let Ok(_) = std::fs::write(&debug_file, &page_content) {
                 tracing::info!("Debug HTML saved to: {}", debug_file);
             }
         }
 
-        // Extract data
-        let data = self.extract_data(driver).await?;
-
-        Ok(data)
+        tracing::info!("Results page loaded successfully");
+        Ok(page_content)
     }
 
-    async fn extract_data(&self, driver: &WebDriver) -> Result<IPTUData> {
+    async fn extract_data_static(driver: &WebDriver) -> Result<IPTUData> {
         let mut data = IPTUData::default();
 
-        // Debug: Get page source to see what we're working with
-        let page_source = driver.source().await?;
-        tracing::debug!("Page contains txtProprietarioNome: {}", page_source.contains("txtProprietarioNome"));
-
-        // Helper function to extract value from element
+        // Helper function
         async fn get_element_value(elem: &WebElement) -> Option<String> {
-            // Try getting value attribute first
             if let Ok(Some(value)) = elem.prop("value").await {
-                if !value.is_empty() {
-                    return Some(value);
-                }
+                if !value.is_empty() { return Some(value); }
             }
-            // Try getting text content
             if let Ok(text) = elem.text().await {
-                if !text.is_empty() {
-                    return Some(text);
-                }
+                if !text.is_empty() { return Some(text); }
             }
-            // Try getting attribute value
             if let Ok(Some(value)) = elem.attr("value").await {
-                if !value.is_empty() {
-                    return Some(value);
-                }
+                if !value.is_empty() { return Some(value); }
             }
             None
         }
 
-        // Extract Número de Cadastro no IPTU
-        if let Ok(elem) = driver.find(By::Name("txtNumeroCadastro")).await {
-            if let Some(value) = get_element_value(&elem).await {
-                tracing::debug!("txtNumeroCadastro value: {:?}", value);
-                data.numero_cadastro = Some(value);
-            }
+        // Extract fields using the correct field names from the HTML
+        // Número do IPTU
+        if let Ok(elem) = driver.find(By::Name("txtNumIPTU")).await {
+            data.numero_cadastro = get_element_value(&elem).await;
+            tracing::debug!("Found txtNumIPTU: {:?}", data.numero_cadastro);
         } else {
-            tracing::warn!("Could not find txtNumeroCadastro element");
+            tracing::warn!("Could not find txtNumIPTU element");
         }
 
-        // Try to extract data by input name attributes
+        // Nome do Proprietário
         if let Ok(elem) = driver.find(By::Name("txtProprietarioNome")).await {
-            if let Some(value) = get_element_value(&elem).await {
-                tracing::debug!("txtProprietarioNome value: {:?}", value);
-                data.nome_proprietario = Some(value);
-            }
+            data.nome_proprietario = get_element_value(&elem).await;
+            tracing::debug!("Found txtProprietarioNome: {:?}", data.nome_proprietario);
         } else {
             tracing::warn!("Could not find txtProprietarioNome element");
         }
 
+        // Nome do Compromissário
         if let Ok(elem) = driver.find(By::Name("txtCompromissarioNome")).await {
-            if let Some(value) = get_element_value(&elem).await {
-                data.nome_compromissario = Some(value);
-            }
+            data.nome_compromissario = get_element_value(&elem).await;
+            tracing::debug!("Found txtCompromissarioNome: {:?}", data.nome_compromissario);
+        } else {
+            tracing::debug!("No txtCompromissarioNome element (may be empty)");
         }
 
+        // Endereço (logradouro)
         if let Ok(elem) = driver.find(By::Name("txtEndereco")).await {
-            if let Some(value) = get_element_value(&elem).await {
-                data.endereco = Some(value);
-            }
+            data.endereco = get_element_value(&elem).await;
+            tracing::debug!("Found txtEndereco: {:?}", data.endereco);
         } else {
             tracing::warn!("Could not find txtEndereco element");
         }
 
+        // Número do endereço
         if let Ok(elem) = driver.find(By::Name("txtNumero")).await {
-            if let Some(value) = get_element_value(&elem).await {
-                data.numero = Some(value);
-            }
+            data.numero = get_element_value(&elem).await;
+            tracing::debug!("Found txtNumero: {:?}", data.numero);
+        } else {
+            tracing::warn!("Could not find txtNumero element");
         }
 
+        // Complemento
         if let Ok(elem) = driver.find(By::Name("txtComplemento")).await {
-            if let Some(value) = get_element_value(&elem).await {
-                data.complemento = Some(value);
-            }
+            data.complemento = get_element_value(&elem).await;
+            tracing::debug!("Found txtComplemento: {:?}", data.complemento);
+        } else {
+            tracing::debug!("No txtComplemento element (may be empty)");
         }
 
+        // Bairro
         if let Ok(elem) = driver.find(By::Name("txtBairro")).await {
-            if let Some(value) = get_element_value(&elem).await {
-                data.bairro = Some(value);
-            }
+            data.bairro = get_element_value(&elem).await;
+            tracing::debug!("Found txtBairro: {:?}", data.bairro);
+        } else {
+            tracing::warn!("Could not find txtBairro element");
         }
 
+        // CEP
         if let Ok(elem) = driver.find(By::Name("txtCepImovel")).await {
-            if let Some(value) = get_element_value(&elem).await {
-                data.cep = Some(value);
-            }
+            data.cep = get_element_value(&elem).await;
+            tracing::debug!("Found txtCepImovel: {:?}", data.cep);
+        } else {
+            tracing::warn!("Could not find txtCepImovel element");
         }
 
         Ok(data)
     }
 
     pub async fn shutdown(self) {
+        // Clean shutdown of all drivers
         for driver in self.driver_pool {
             let _ = driver.quit().await;
         }
     }
-}
-
-#[derive(Debug, Default, Clone)]
-struct IPTUData {
-    numero_cadastro: Option<String>,
-    nome_proprietario: Option<String>,
-    nome_compromissario: Option<String>,
-    endereco: Option<String>,
-    numero: Option<String>,
-    complemento: Option<String>,
-    bairro: Option<String>,
-    cep: Option<String>,
 }
