@@ -80,6 +80,12 @@ impl ScraperEngine {
         let total = jobs.len();
         let mut completed = 0;
 
+        // Log the jobs being processed
+        tracing::info!("Processing {} jobs total", total);
+        for (idx, job) in jobs.iter().enumerate() {
+            tracing::info!("Job {}: {}", idx + 1, job);
+        }
+
         // Calculate delay between requests to respect rate limit
         let delay_ms = if self.config.rate_limit_per_hour > 0 {
             (3600 * 1000) / self.config.rate_limit_per_hour as u64
@@ -92,6 +98,8 @@ impl ScraperEngine {
             for (i, contributor_number) in chunk.iter().enumerate() {
                 let driver = &self.driver_pool[i];
                 let number = contributor_number.clone();
+
+                tracing::info!("Processing job {}/{}: {}", completed + 1, total, number);
 
                 // Process job
                 let result = self.scrape_iptu(driver, &number).await;

@@ -3,8 +3,9 @@ mod scraper;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use tracing::info;
+use tracing::{info, warn};
 use std::sync::Arc;
+use std::collections::HashSet;
 
 use supabase::{SupabaseClient, IPTUResult};
 use scraper::{ScraperConfig, ScraperEngine};
@@ -99,10 +100,25 @@ async fn main() -> Result<()> {
 
             info!("Found {} pending jobs", jobs.len());
 
-            // Extract contributor numbers
-            let contributor_numbers: Vec<String> = jobs.iter()
+            // Extract contributor numbers and remove duplicates
+            let mut contributor_numbers: Vec<String> = jobs.iter()
                 .map(|j| j.contributor_number.clone())
                 .collect();
+
+            // Remove duplicates while preserving order
+            let mut seen = std::collections::HashSet::new();
+            contributor_numbers.retain(|item| seen.insert(item.clone()));
+
+            if contributor_numbers.len() != jobs.len() {
+                warn!("Found {} duplicate jobs, processing {} unique jobs",
+                    jobs.len() - contributor_numbers.len(),
+                    contributor_numbers.len());
+            }
+
+            // Log the contributor numbers
+            for (idx, num) in contributor_numbers.iter().enumerate() {
+                info!("Job {}: {}", idx + 1, num);
+            }
 
             // Claim the jobs
             info!("Claiming jobs...");
