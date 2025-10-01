@@ -1,6 +1,7 @@
 use anyhow::Result;
 use thirtyfour::{WebDriver, DesiredCapabilities, By, WebElement};
 use tokio::time::{sleep, Duration};
+use rand::Rng;
 
 // ScraperResult moved inline
 #[derive(Debug, Clone)]
@@ -112,7 +113,13 @@ impl ScraperEngine {
                 completed += 1;
                 progress_callback(completed, total);
 
-                // Rate limiting
+                // Add random delay between 2-5 seconds to avoid being detected as bot
+                let mut rng = rand::thread_rng();
+                let random_delay = rng.gen_range(2000..=5000); // 2 to 5 seconds in milliseconds
+                tracing::info!("Waiting {}ms before next request", random_delay);
+                sleep(Duration::from_millis(random_delay)).await;
+
+                // Additional rate limiting if configured
                 if delay_ms > 0 {
                     sleep(Duration::from_millis(delay_ms)).await;
                 }
@@ -126,15 +133,57 @@ impl ScraperEngine {
         tracing::info!("Starting scrape for: {}", contributor_number);
 
         // Navigate to São Paulo IPTU website
-        driver.goto("https://www.prefeitura.sp.gov.br/sf8663/formsinternet/principal.aspx").await?;
+        driver.goto("https://www3.prefeitura.sp.gov.br/sf8663/formsinternet/principal.aspx").await?;
 
         // Wait for page load
         sleep(Duration::from_secs(3)).await;
 
-        // Handle cookie consent modal if present
-        if let Ok(consent_button) = driver.find(By::Css("button:contains('Autorizo o uso de todos os cookies')")).await {
-            let _ = consent_button.click().await;
+        // Handle cookie consent modal - it's an input button, not a button element
+        tracing::info!("Looking for cookie consent modal...");
+
+        // Try multiple selectors to find the cookie consent button
+        let cookie_selectors = vec![
+            "input.cc__button__autorizacao--all",
+            "input[type='button'][class*='cc__button__autorizacao']",
+            "input[value*='Autorizo o uso de todos os cookies']",
+            ".cc__button__autorizacao--all",
+        ];
+
+        let mut cookie_handled = false;
+        for selector in cookie_selectors {
+            if let Ok(consent_button) = driver.find(By::Css(selector)).await {
+                tracing::info!("Found cookie consent button with selector: {}", selector);
+
+                // Try JavaScript click first (more reliable)
+                let js_click = format!(
+                    "document.querySelector('{}').click();",
+                    selector
+                );
+
+                match driver.execute(&js_click, vec![]).await {
+                    Ok(_) => {
+                        tracing::info!("Cookie consent accepted via JavaScript");
+                        cookie_handled = true;
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!("JavaScript click failed: {}, trying direct click", e);
+                        // Fallback to direct click
+                        if consent_button.click().await.is_ok() {
+                            tracing::info!("Cookie consent accepted via direct click");
+                            cookie_handled = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if cookie_handled {
             sleep(Duration::from_secs(2)).await;
+            tracing::info!("Cookie modal dismissed, continuing...");
+        } else {
+            tracing::info!("No cookie consent modal found or couldn't click it");
         }
 
         // Parse contributor number (remove dots and dashes)
@@ -160,41 +209,9 @@ impl ScraperEngine {
         // Wait a bit for any dynamic content to load
         sleep(Duration::from_secs(2)).await;
 
-        // Try to dismiss cookie consent modal if it appears
-        // Look for common accept/continue buttons in the modal
-        let cookie_selectors = vec![
-            "button[class*='aceitar']",
-            "button[class*='continuar']",
-            "button[class*='accept']",
-            "button[class*='continue']",
-            "//button[contains(text(), 'Aceitar')]",
-            "//button[contains(text(), 'Continuar')]",
-            "//button[contains(text(), 'Prosseguir')]",
-        ];
-
-        for selector in cookie_selectors {
-            if selector.starts_with("//") {
-                // XPath selector
-                if let Ok(button) = driver.find(By::XPath(selector)).await {
-                    if let Ok(_) = button.click().await {
-                        tracing::info!("Clicked cookie consent button");
-                        sleep(Duration::from_millis(500)).await;
-                        break;
-                    }
-                }
-            } else {
-                // CSS selector
-                if let Ok(button) = driver.find(By::Css(selector)).await {
-                    if let Ok(_) = button.click().await {
-                        tracing::info!("Clicked cookie consent button");
-                        sleep(Duration::from_millis(500)).await;
-                        break;
-                    }
-                }
-            }
-        }
-
         // Submit form - use JavaScript click to bypass overlay issues
+        tracing::info!("Submitting form...");
+
         // Execute JavaScript directly instead of trying to click the element
         let click_script = r#"
             var btn = document.getElementById('_BtnAvancarDasii');
@@ -212,23 +229,44 @@ impl ScraperEngine {
             Err(e) => {
                 tracing::warn!("JavaScript click failed: {}, trying regular click", e);
                 // Fallback to finding and clicking the element
-                let submit_button = driver.find(By::Id("_BtnAvancarDasii")).await?;
-                submit_button.click().await?;
+                if let Ok(submit_button) = driver.find(By::Id("_BtnAvancarDasii")).await {
+                    submit_button.click().await?;
+                    tracing::info!("Form submitted via direct click");
+                } else {
+                    anyhow::bail!("Could not find submit button");
+                }
             }
         }
 
         // Wait for results page to load
-        sleep(Duration::from_secs(5)).await;
+        tracing::info!("Waiting for results page to load...");
+        sleep(Duration::from_secs(8)).await;
 
         // Check if we're on the data page
         let page_content = driver.source().await?;
-        if !page_content.contains("DADOS DO IMÓVEL") {
-            // Try alternative text to check if page loaded
-            if !page_content.contains("Dados do Imóvel") && !page_content.contains("Proprietário") {
-                tracing::error!("Page does not contain expected content markers");
-                anyhow::bail!("Página de dados não carregada");
+        let current_url = driver.current_url().await?;
+        tracing::info!("Current URL after form submit: {}", current_url);
+
+        // Check for various indicators that we're on the results page
+        let is_results_page = page_content.contains("DADOS DO IMÓVEL")
+            || page_content.contains("Dados do Imóvel")
+            || page_content.contains("Proprietário")
+            || page_content.contains("txtProprietarioNome")
+            || page_content.contains("txtNumeroCadastro");
+
+        if !is_results_page {
+            // Check if we're still on the form page (error occurred)
+            if page_content.contains("_BtnAvancarDasii") {
+                tracing::error!("Still on form page - submission may have failed");
+                anyhow::bail!("Form submission failed - still on form page");
             }
+
+            tracing::error!("Page does not contain expected content markers");
+            tracing::error!("Page length: {} bytes", page_content.len());
+            anyhow::bail!("Página de dados não carregada");
         }
+
+        tracing::info!("Results page loaded successfully");
 
         // Save page source for debugging
         tracing::debug!("Page loaded, extracting data...");
