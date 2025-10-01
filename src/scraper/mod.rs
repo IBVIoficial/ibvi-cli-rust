@@ -141,68 +141,6 @@ impl ScraperEngine {
         results
     }
 
-    // Keep the old method for backward compatibility
-    pub async fn process_batch_with_rate_limit<F>(
-        &self,
-        jobs: Vec<String>,
-        mut progress_callback: F,
-    ) -> Vec<ScraperResult>
-    where
-        F: FnMut(usize, usize) + Send + 'static,
-    {
-        let mut results = Vec::new();
-        let total = jobs.len();
-        let mut completed = 0;
-
-        // Calculate delay between requests to respect rate limit
-        let delay_ms = if self.config.rate_limit_per_hour > 0 {
-            (3600 * 1000) / self.config.rate_limit_per_hour as u64
-        } else {
-            0
-        };
-
-        for chunk in jobs.chunks(self.config.max_concurrent) {
-
-            for (i, contributor_number) in chunk.iter().enumerate() {
-                let driver = &self.driver_pool[i];
-                let number = contributor_number.clone();
-
-                // Process job
-                let result = self.scrape_iptu(driver, &number).await;
-
-                results.push(ScraperResult {
-                    contributor_number: number,
-                    numero_cadastro: result.as_ref().ok().and_then(|r| r.numero_cadastro.clone()),
-                    nome_proprietario: result.as_ref().ok().and_then(|r| r.nome_proprietario.clone()),
-                    nome_compromissario: result.as_ref().ok().and_then(|r| r.nome_compromissario.clone()),
-                    endereco: result.as_ref().ok().and_then(|r| r.endereco.clone()),
-                    numero: result.as_ref().ok().and_then(|r| r.numero.clone()),
-                    complemento: result.as_ref().ok().and_then(|r| r.complemento.clone()),
-                    bairro: result.as_ref().ok().and_then(|r| r.bairro.clone()),
-                    cep: result.as_ref().ok().and_then(|r| r.cep.clone()),
-                    success: result.is_ok(),
-                    error: result.err().map(|e| e.to_string()),
-                });
-
-                completed += 1;
-                progress_callback(completed, total);
-
-                // Add random delay between 2-5 seconds to avoid being detected as bot
-                let mut rng = rand::thread_rng();
-                let random_delay = rng.gen_range(2000..=5000); // 2 to 5 seconds in milliseconds
-                tracing::info!("Waiting {}ms before next request", random_delay);
-                sleep(Duration::from_millis(random_delay)).await;
-
-                // Additional rate limiting if configured
-                if delay_ms > 0 {
-                    sleep(Duration::from_millis(delay_ms)).await;
-                }
-            }
-        }
-
-        results
-    }
-
     async fn scrape_iptu(&self, driver: &WebDriver, contributor_number: &str) -> Result<IPTUData> {
         tracing::info!("Starting scrape for: {}", contributor_number);
 
