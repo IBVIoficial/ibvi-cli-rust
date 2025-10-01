@@ -21,3 +21,5 @@ dotenv = "0.15"
 sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "sqlite", "chrono"] }
 rand = "0.8"
 futures = "0.3.31"
+# Pin base64ct to avoid edition2024 requirement
+base64ct = "=1.6.0"
