@@ -138,52 +138,118 @@ impl ScraperEngine {
         // Wait for page load
         sleep(Duration::from_secs(3)).await;
 
-        // Handle cookie consent modal - it's an input button, not a button element
+        // Handle cookie consent modal with multiple attempts
         tracing::info!("Looking for cookie consent modal...");
 
-        // Try multiple selectors to find the cookie consent button
-        let cookie_selectors = vec![
-            "input.cc__button__autorizacao--all",
-            "input[type='button'][class*='cc__button__autorizacao']",
-            "input[value*='Autorizo o uso de todos os cookies']",
-            ".cc__button__autorizacao--all",
-        ];
+        // Wait a bit for modal to appear
+        sleep(Duration::from_secs(2)).await;
 
         let mut cookie_handled = false;
-        for selector in cookie_selectors {
-            if let Ok(consent_button) = driver.find(By::Css(selector)).await {
-                tracing::info!("Found cookie consent button with selector: {}", selector);
+        let max_attempts = 3;
 
-                // Try JavaScript click first (more reliable)
-                let js_click = format!(
-                    "document.querySelector('{}').click();",
-                    selector
-                );
+        for attempt in 1..=max_attempts {
+            tracing::info!("Cookie consent attempt {}/{}", attempt, max_attempts);
 
-                match driver.execute(&js_click, vec![]).await {
-                    Ok(_) => {
-                        tracing::info!("Cookie consent accepted via JavaScript");
-                        cookie_handled = true;
+            // Method 1: Direct JavaScript execution to click the button
+            let js_direct_click = r#"
+                // Find all elements that might be the cookie button
+                var buttons = document.querySelectorAll('input[type="button"], button');
+                var clicked = false;
+
+                for (var i = 0; i < buttons.length; i++) {
+                    var btn = buttons[i];
+                    var text = (btn.value || btn.textContent || '').toLowerCase();
+
+                    if (text.includes('autorizo') && text.includes('cookies')) {
+                        console.log('Found cookie button:', btn);
+                        btn.click();
+                        clicked = true;
                         break;
                     }
-                    Err(e) => {
-                        tracing::warn!("JavaScript click failed: {}, trying direct click", e);
-                        // Fallback to direct click
-                        if consent_button.click().await.is_ok() {
-                            tracing::info!("Cookie consent accepted via direct click");
+                }
+
+                if (!clicked) {
+                    // Try by class name
+                    var cookieBtn = document.querySelector('input.cc__button__autorizacao--all');
+                    if (cookieBtn) {
+                        cookieBtn.click();
+                        clicked = true;
+                    }
+                }
+
+                return clicked;
+            "#;
+
+            match driver.execute(js_direct_click, vec![]).await {
+                Ok(result) => {
+                    tracing::info!("JavaScript cookie consent result: {:?}", result);
+
+                    // Wait and check if modal is gone
+                    sleep(Duration::from_secs(2)).await;
+
+                    // Verify the modal is gone
+                    let check_modal = r#"
+                        var buttons = document.querySelectorAll('input[type="button"]');
+                        for (var i = 0; i < buttons.length; i++) {
+                            var text = (buttons[i].value || '').toLowerCase();
+                            if (text.includes('autorizo') && text.includes('cookies')) {
+                                return true; // Modal still present
+                            }
+                        }
+                        return false; // Modal gone
+                    "#;
+
+                    if let Ok(modal_present) = driver.execute(check_modal, vec![]).await {
+                        tracing::info!("Modal still present: {:?}", modal_present);
+
+                        // Check if the result indicates modal is gone (returns false)
+                        let modal_gone = format!("{:?}", modal_present).contains("false");
+
+                        if modal_gone {
+                            tracing::info!("Cookie modal successfully dismissed!");
+                            cookie_handled = true;
+                            break;
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("JavaScript execution failed: {}", e);
+                }
+            }
+
+            // Method 2: Try WebDriver click as fallback
+            if !cookie_handled {
+                let selectors = vec![
+                    "input.cc__button__autorizacao--all",
+                    "input[value*='Autorizo o uso']",
+                ];
+
+                for selector in selectors {
+                    if let Ok(button) = driver.find(By::Css(selector)).await {
+                        tracing::info!("Found button with selector: {}, attempting click", selector);
+                        if button.click().await.is_ok() {
+                            sleep(Duration::from_secs(2)).await;
                             cookie_handled = true;
                             break;
                         }
                     }
                 }
             }
+
+            if cookie_handled {
+                break;
+            }
+
+            if attempt < max_attempts {
+                tracing::warn!("Cookie modal not dismissed, retrying...");
+                sleep(Duration::from_secs(1)).await;
+            }
         }
 
         if cookie_handled {
-            sleep(Duration::from_secs(2)).await;
-            tracing::info!("Cookie modal dismissed, continuing...");
+            tracing::info!("Cookie consent handled successfully");
         } else {
-            tracing::info!("No cookie consent modal found or couldn't click it");
+            tracing::warn!("Could not dismiss cookie modal after {} attempts, continuing anyway", max_attempts);
         }
 
         // Parse contributor number (remove dots and dashes)
