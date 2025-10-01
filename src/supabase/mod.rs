@@ -35,18 +35,6 @@ pub struct IPTUResult {
     pub processed_by: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Batch {
-    pub id: String,
-    pub total: i32,
-    pub processados: i32,
-    pub sucesso: i32,
-    pub erros: i32,
-    pub status: String,
-    pub created_at: String,
-    pub completed_at: Option<String>,
-}
-
 pub struct SupabaseClient {
     client: Client,
     base_url: String,
@@ -77,7 +65,8 @@ impl SupabaseClient {
         tracing::info!("Checking iptus_list_priority table for pending jobs...");
         let priority_url = format!("{}/rest/v1/iptus_list_priority", self.base_url);
 
-        let priority_response = self.client
+        let priority_response = self
+            .client
             .get(&priority_url)
             .header("apikey", auth_key)
             .header("Authorization", format!("Bearer {}", auth_key))
@@ -94,18 +83,29 @@ impl SupabaseClient {
             let text = priority_response.text().await?;
             tracing::debug!("Response from iptus_list_priority: {}", text);
 
-            let mut priority_jobs = serde_json::from_str::<Vec<PendingJob>>(&text)
-                .map_err(|e| anyhow::anyhow!("Failed to parse priority response: {}. Response: {}", e, text))?;
+            let mut priority_jobs =
+                serde_json::from_str::<Vec<PendingJob>>(&text).map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to parse priority response: {}. Response: {}",
+                        e,
+                        text
+                    )
+                })?;
 
             if !priority_jobs.is_empty() {
-                tracing::info!("Found {} priority jobs in iptus_list_priority", priority_jobs.len());
+                tracing::info!(
+                    "Found {} priority jobs in iptus_list_priority",
+                    priority_jobs.len()
+                );
                 // Mark these jobs as coming from priority table
                 for job in &mut priority_jobs {
                     job.from_priority_table = true;
                 }
                 return Ok(priority_jobs);
             } else {
-                tracing::info!("No pending jobs found in iptus_list_priority, checking iptus_list...");
+                tracing::info!(
+                    "No pending jobs found in iptus_list_priority, checking iptus_list..."
+                );
             }
         } else {
             let error_text = priority_response.text().await?;
@@ -115,7 +115,8 @@ impl SupabaseClient {
         // If no priority jobs or priority table doesn't exist, fetch from regular iptus_list
         let url = format!("{}/rest/v1/iptus_list", self.base_url);
 
-        let response = self.client
+        let response = self
+            .client
             .get(&url)
             .header("apikey", auth_key)
             .header("Authorization", format!("Bearer {}", auth_key))
@@ -130,7 +131,10 @@ impl SupabaseClient {
 
         if !response.status().is_success() {
             let error_text = response.text().await?;
-            anyhow::bail!("Failed to fetch pending jobs from both tables: {}", error_text);
+            anyhow::bail!(
+                "Failed to fetch pending jobs from both tables: {}",
+                error_text
+            );
         }
 
         let text = response.text().await?;
@@ -148,8 +152,17 @@ impl SupabaseClient {
         Ok(jobs)
     }
 
-    pub async fn claim_jobs(&self, job_ids: Vec<String>, _machine_id: &str, from_priority_table: bool) -> Result<()> {
-        let table_name = if from_priority_table { "iptus_list_priority" } else { "iptus_list" };
+    pub async fn claim_jobs(
+        &self,
+        job_ids: Vec<String>,
+        _machine_id: &str,
+        from_priority_table: bool,
+    ) -> Result<()> {
+        let table_name = if from_priority_table {
+            "iptus_list_priority"
+        } else {
+            "iptus_list"
+        };
         let url = format!("{}/rest/v1/{}", self.base_url, table_name);
 
         // Use service role key if available, otherwise use anon key
@@ -182,12 +195,13 @@ impl SupabaseClient {
         // Use service role key if available, otherwise use anon key
         let auth_key = self.service_role_key.as_ref().unwrap_or(&self.api_key);
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .header("apikey", auth_key)
             .header("Authorization", format!("Bearer {}", auth_key))
             .header("Content-Type", "application/json")
-            .header("Prefer", "resolution=merge-duplicates")  // Use upsert instead of insert
+            .header("Prefer", "resolution=merge-duplicates") // Use upsert instead of insert
             .json(&results)
             .send()
             .await?;
@@ -216,7 +230,8 @@ impl SupabaseClient {
             "status": "processing"
         });
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .header("apikey", auth_key)
             .header("Authorization", format!("Bearer {}", auth_key))
@@ -233,7 +248,13 @@ impl SupabaseClient {
         Ok(batch_id)
     }
 
-    pub async fn update_batch_progress(&self, batch_id: &str, processados: i32, sucesso: i32, erros: i32) -> Result<()> {
+    pub async fn update_batch_progress(
+        &self,
+        batch_id: &str,
+        processados: i32,
+        sucesso: i32,
+        erros: i32,
+    ) -> Result<()> {
         let url = format!("{}/rest/v1/batches", self.base_url);
         let auth_key = self.service_role_key.as_ref().unwrap_or(&self.api_key);
 
@@ -243,7 +264,8 @@ impl SupabaseClient {
             "erros": erros,
         });
 
-        let response = self.client
+        let response = self
+            .client
             .patch(&url)
             .header("apikey", auth_key)
             .header("Authorization", format!("Bearer {}", auth_key))
@@ -283,8 +305,16 @@ impl SupabaseClient {
         Ok(())
     }
 
-    pub async fn mark_iptu_list_as_success(&self, contributor_numbers: Vec<String>, from_priority_table: bool) -> Result<()> {
-        let table_name = if from_priority_table { "iptus_list_priority" } else { "iptus_list" };
+    pub async fn mark_iptu_list_as_success(
+        &self,
+        contributor_numbers: Vec<String>,
+        from_priority_table: bool,
+    ) -> Result<()> {
+        let table_name = if from_priority_table {
+            "iptus_list_priority"
+        } else {
+            "iptus_list"
+        };
         let url = format!("{}/rest/v1/{}", self.base_url, table_name);
 
         // Use service role key if available, otherwise use anon key
@@ -309,8 +339,16 @@ impl SupabaseClient {
         Ok(())
     }
 
-    pub async fn mark_iptu_list_as_error(&self, contributor_numbers: Vec<String>, from_priority_table: bool) -> Result<()> {
-        let table_name = if from_priority_table { "iptus_list_priority" } else { "iptus_list" };
+    pub async fn mark_iptu_list_as_error(
+        &self,
+        contributor_numbers: Vec<String>,
+        from_priority_table: bool,
+    ) -> Result<()> {
+        let table_name = if from_priority_table {
+            "iptus_list_priority"
+        } else {
+            "iptus_list"
+        };
         let url = format!("{}/rest/v1/{}", self.base_url, table_name);
 
         // Use service role key if available, otherwise use anon key
@@ -341,7 +379,8 @@ impl SupabaseClient {
         // Use service role key if available, otherwise use anon key
         let auth_key = self.service_role_key.as_ref().unwrap_or(&self.api_key);
 
-        let response = self.client
+        let response = self
+            .client
             .get(&url)
             .header("apikey", auth_key)
             .header("Authorization", format!("Bearer {}", auth_key))
@@ -372,7 +411,8 @@ impl SupabaseClient {
             "completed_at": chrono::Utc::now().to_rfc3339(),
         });
 
-        let response = self.client
+        let response = self
+            .client
             .patch(&url)
             .header("apikey", auth_key)
             .header("Authorization", format!("Bearer {}", auth_key))
