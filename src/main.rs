@@ -5,9 +5,8 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing::{info, warn};
 use std::sync::Arc;
-use std::collections::HashSet;
 
-use supabase::{SupabaseClient, IPTUResult};
+use supabase::SupabaseClient;
 use scraper::{ScraperConfig, ScraperEngine};
 
 #[derive(Parser)]
@@ -122,8 +121,8 @@ async fn main() -> Result<()> {
 
             // Claim the jobs
             info!("Claiming jobs...");
-            let machine_id = "cli";
-            client.claim_jobs(contributor_numbers.clone(), machine_id).await?;
+            let machine_id = "cli".to_string();
+            client.claim_jobs(contributor_numbers.clone(), &machine_id).await?;
 
             // Create batch
             let batch_id = client.create_batch(contributor_numbers.len() as i32).await?;
@@ -145,7 +144,6 @@ async fn main() -> Result<()> {
             let batch_id_clone = batch_id.clone();
             let client_arc = Arc::new(client);
             let client_for_callback = client_arc.clone();
-            let machine_id_clone = machine_id.clone();
 
             let results = scraper.process_batch_with_callback(
                 contributor_numbers.clone(),
@@ -155,7 +153,7 @@ async fn main() -> Result<()> {
                     // Upload each result immediately after processing
                     let client = client_for_callback.clone();
                     let batch_id = batch_id_clone.clone();
-                    let machine_id = machine_id_clone.clone();
+                    let machine_id = machine_id.clone();
                     let result_clone = result.clone();
 
                     tokio::spawn(async move {
