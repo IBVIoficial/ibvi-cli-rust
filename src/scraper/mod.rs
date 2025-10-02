@@ -461,7 +461,7 @@ impl ScraperEngine {
 
         // Save debug HTML
         if let Ok(home) = std::env::var("HOME") {
-            let debug_file = format!("{}/Desktop/iptu_debug_{}.html", home, contributor_number.replace(".", ""));
+            let debug_file = format!("{}/Desktop/iptus/iptu_debug_{}.html", home, contributor_number.replace(".", ""));
             if let Ok(_) = std::fs::write(&debug_file, &page_content) {
                 tracing::info!("Debug HTML saved to: {}", debug_file);
             }
