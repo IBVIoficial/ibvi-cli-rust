@@ -1,24 +1,24 @@
 use anyhow::Result;
-use thirtyfour::{WebDriver, DesiredCapabilities, By, WebElement};
-use tokio::time::{sleep, Duration};
-use rand::Rng;
 use rand::seq::SliceRandom;
+use rand::Rng;
+use thirtyfour::{By, DesiredCapabilities, WebDriver, WebElement};
+use tokio::time::{sleep, Duration};
 
 // Delay patterns for human-like behavior
 #[derive(Clone)]
 enum DelayPattern {
-    Quick,      // 1-3 seconds
-    Normal,     // 3-7 seconds
-    Slow,       // 7-15 seconds
+    Quick,  // 1-3 seconds
+    Normal, // 3-7 seconds
+    Slow,   // 7-15 seconds
 }
 
 impl DelayPattern {
     async fn wait(&self) {
         let mut rng = rand::thread_rng();
         let delay_ms = match self {
-            Self::Quick => rng.gen_range(1000..3000),
-            Self::Normal => rng.gen_range(3000..7000),
-            Self::Slow => rng.gen_range(7000..15000),
+            Self::Quick => rng.gen_range(1000..2000),
+            Self::Normal => rng.gen_range(2000..4000),
+            Self::Slow => rng.gen_range(4000..10000),
         };
 
         // Add extra jitter: ±20%
@@ -32,7 +32,7 @@ impl DelayPattern {
         let patterns = [
             Self::Quick,
             Self::Normal,
-            Self::Normal,  // More likely to be normal
+            Self::Normal, // More likely to be normal
             Self::Normal,
             Self::Slow,
         ];
@@ -104,10 +104,9 @@ impl ScraperEngine {
         for _ in 0..num_scrolls {
             let scroll_amount = rng.gen_range(200..800);
 
-            driver.execute(&format!(
-                "window.scrollBy(0, {});",
-                scroll_amount
-            ), vec![]).await?;
+            driver
+                .execute(&format!("window.scrollBy(0, {});", scroll_amount), vec![])
+                .await?;
 
             // Wait between scrolls (reading time)
             sleep(Duration::from_millis(rng.gen_range(300..1000))).await;
@@ -165,7 +164,9 @@ impl ScraperEngine {
             let driver = WebDriver::new("http://localhost:9515", caps).await?;
 
             // Inject JavaScript to hide automation indicators
-            let _ = driver.execute(r#"
+            let _ = driver
+                .execute(
+                    r#"
                 Object.defineProperty(navigator, 'webdriver', {
                     get: () => undefined
                 });
@@ -183,7 +184,10 @@ impl ScraperEngine {
                         query: () => Promise.resolve({ state: 'granted' })
                     })
                 });
-            "#, vec![]).await;
+            "#,
+                    vec![],
+                )
+                .await;
 
             driver_pool.push(driver);
         }
@@ -249,7 +253,11 @@ impl ScraperEngine {
                 let task = async move {
                     // Apply the stagger delay for all jobs except the first one
                     if stagger_delay > 0 {
-                        tracing::info!("Waiting {}ms before starting job: {}", stagger_delay, number);
+                        tracing::info!(
+                            "Waiting {}ms before starting job: {}",
+                            stagger_delay,
+                            number
+                        );
                         sleep(Duration::from_millis(stagger_delay)).await;
                     }
 
@@ -260,9 +268,18 @@ impl ScraperEngine {
 
                     let scraper_result = ScraperResult {
                         contributor_number: number.clone(),
-                        numero_cadastro: result.as_ref().ok().and_then(|r| r.numero_cadastro.clone()),
-                        nome_proprietario: result.as_ref().ok().and_then(|r| r.nome_proprietario.clone()),
-                        nome_compromissario: result.as_ref().ok().and_then(|r| r.nome_compromissario.clone()),
+                        numero_cadastro: result
+                            .as_ref()
+                            .ok()
+                            .and_then(|r| r.numero_cadastro.clone()),
+                        nome_proprietario: result
+                            .as_ref()
+                            .ok()
+                            .and_then(|r| r.nome_proprietario.clone()),
+                        nome_compromissario: result
+                            .as_ref()
+                            .ok()
+                            .and_then(|r| r.nome_compromissario.clone()),
                         endereco: result.as_ref().ok().and_then(|r| r.endereco.clone()),
                         numero: result.as_ref().ok().and_then(|r| r.numero.clone()),
                         complemento: result.as_ref().ok().and_then(|r| r.complemento.clone()),
@@ -309,7 +326,9 @@ impl ScraperEngine {
         tracing::info!("Starting scrape for: {}", contributor_number);
 
         // Navigate to São Paulo IPTU website
-        driver.goto("https://www3.prefeitura.sp.gov.br/sf8663/formsinternet/principal.aspx").await?;
+        driver
+            .goto("https://www3.prefeitura.sp.gov.br/sf8663/formsinternet/principal.aspx")
+            .await?;
 
         // Human-like delay pattern after page load
         DelayPattern::random().wait().await;
@@ -332,7 +351,10 @@ impl ScraperEngine {
         Self::extract_data_static(driver).await
     }
 
-    async fn handle_cookie_and_fill_form(driver: &WebDriver, contributor_number: &str) -> Result<String> {
+    async fn handle_cookie_and_fill_form(
+        driver: &WebDriver,
+        contributor_number: &str,
+    ) -> Result<String> {
         // Cookie handling logic (extracted from scrape_iptu)
         tracing::info!("Looking for cookie consent modal...");
 
@@ -404,7 +426,11 @@ impl ScraperEngine {
         }
 
         // Fill form logic
-        let parts = contributor_number.replace(".", "").replace("-", "").trim().to_string();
+        let parts = contributor_number
+            .replace(".", "")
+            .replace("-", "")
+            .trim()
+            .to_string();
         if parts.len() < 11 {
             anyhow::bail!("Número de cadastro inválido");
         }
@@ -461,7 +487,11 @@ impl ScraperEngine {
 
         // Save debug HTML
         if let Ok(home) = std::env::var("HOME") {
-            let debug_file = format!("{}/Desktop/iptus/iptu_debug_{}.html", home, contributor_number.replace(".", ""));
+            let debug_file = format!(
+                "{}/Desktop/iptus/iptu_debug_{}.html",
+                home,
+                contributor_number.replace(".", "")
+            );
             if let Ok(_) = std::fs::write(&debug_file, &page_content) {
                 tracing::info!("Debug HTML saved to: {}", debug_file);
             }
@@ -477,13 +507,19 @@ impl ScraperEngine {
         // Helper function
         async fn get_element_value(elem: &WebElement) -> Option<String> {
             if let Ok(Some(value)) = elem.prop("value").await {
-                if !value.is_empty() { return Some(value); }
+                if !value.is_empty() {
+                    return Some(value);
+                }
             }
             if let Ok(text) = elem.text().await {
-                if !text.is_empty() { return Some(text); }
+                if !text.is_empty() {
+                    return Some(text);
+                }
             }
             if let Ok(Some(value)) = elem.attr("value").await {
-                if !value.is_empty() { return Some(value); }
+                if !value.is_empty() {
+                    return Some(value);
+                }
             }
             None
         }
@@ -508,7 +544,10 @@ impl ScraperEngine {
         // Nome do Compromissário
         if let Ok(elem) = driver.find(By::Name("txtCompromissarioNome")).await {
             data.nome_compromissario = get_element_value(&elem).await;
-            tracing::debug!("Found txtCompromissarioNome: {:?}", data.nome_compromissario);
+            tracing::debug!(
+                "Found txtCompromissarioNome: {:?}",
+                data.nome_compromissario
+            );
         } else {
             tracing::debug!("No txtCompromissarioNome element (may be empty)");
         }

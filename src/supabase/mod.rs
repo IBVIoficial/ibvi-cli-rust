@@ -59,13 +59,13 @@ impl SupabaseClient {
 
     pub async fn fetch_pending_jobs(&self, limit: usize) -> Result<Vec<PendingJob>> {
         // Use service role key if available, otherwise use anon key
-        let auth_key = self.service_role_key.as_ref().unwrap_or(&self.api_key);
+        let auth_key: &String = self.service_role_key.as_ref().unwrap_or(&self.api_key);
 
         // First try to fetch from iptus_list_priority
         tracing::info!("Checking iptus_list_priority table for pending jobs...");
-        let priority_url = format!("{}/rest/v1/iptus_list_priority", self.base_url);
+        let priority_url: String = format!("{}/rest/v1/iptus_list_priority", self.base_url);
 
-        let priority_response = self
+        let priority_response: reqwest::Response = self
             .client
             .get(&priority_url)
             .header("apikey", auth_key)
