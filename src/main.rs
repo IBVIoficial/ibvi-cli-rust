@@ -5,10 +5,86 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::process::Command;
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::{info, warn};
 
 use scraper::{ScraperConfig, ScraperEngine};
 use supabase::SupabaseClient;
+
+struct PerformanceReport {
+    total_jobs: usize,
+    successful: usize,
+    failed: usize,
+    duration_secs: f64,
+    jobs_per_minute: f64,
+    success_rate: f64,
+}
+
+impl PerformanceReport {
+    fn new(total_jobs: usize, successful: usize, failed: usize, duration_secs: f64) -> Self {
+        let jobs_per_minute = if duration_secs > 0.0 {
+            (total_jobs as f64 / duration_secs) * 60.0
+        } else {
+            0.0
+        };
+
+        let success_rate = if total_jobs > 0 {
+            (successful as f64 / total_jobs as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        Self {
+            total_jobs,
+            successful,
+            failed,
+            duration_secs,
+            jobs_per_minute,
+            success_rate,
+        }
+    }
+
+    fn format_duration(&self) -> String {
+        let total_secs = self.duration_secs as u64;
+        let hours = total_secs / 3600;
+        let minutes = (total_secs % 3600) / 60;
+        let seconds = total_secs % 60;
+
+        if hours > 0 {
+            format!("{}h {}m {}s", hours, minutes, seconds)
+        } else if minutes > 0 {
+            format!("{}m {}s", minutes, seconds)
+        } else {
+            format!("{}s", seconds)
+        }
+    }
+
+    fn display(&self) {
+        println!("\n╔══════════════════════════════════════════════════════════╗");
+        println!("║              PERFORMANCE REPORT                          ║");
+        println!("╠══════════════════════════════════════════════════════════╣");
+        println!("║  Total Jobs:              {:>30} ║", self.total_jobs);
+        println!("║  Successful:              {:>30} ║", self.successful);
+        println!("║  Failed:                  {:>30} ║", self.failed);
+        println!("║  Duration:                {:>30} ║", self.format_duration());
+        println!("║  Throughput:              {:>26.2}/min ║", self.jobs_per_minute);
+        println!("║  Success Rate:            {:>27.1}% ║", self.success_rate);
+
+        // Performance status based on success rate and throughput
+        let status = if self.success_rate >= 90.0 && self.jobs_per_minute >= 5.0 {
+            "🟢 EXCELLENT"
+        } else if self.success_rate >= 75.0 && self.jobs_per_minute >= 3.0 {
+            "🟡 GOOD"
+        } else if self.success_rate >= 50.0 {
+            "🟠 MODERATE"
+        } else {
+            "🔴 NEEDS IMPROVEMENT"
+        };
+
+        println!("║  Status:                  {:>30} ║", status);
+        println!("╚══════════════════════════════════════════════════════════╝\n");
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "iptu-cli")]
@@ -101,6 +177,9 @@ async fn main() -> Result<()> {
             file,
             numbers,
         } => {
+            // Start timer
+            let start_time = Instant::now();
+
             // Start ChromeDriver
             info!("Attempting to start ChromeDriver...");
             let status = Command::new("sh")
@@ -328,6 +407,16 @@ async fn main() -> Result<()> {
 
             info!("Processing complete!");
             info!("Success: {}, Errors: {}", success_count, error_count);
+
+            // Calculate and display performance report
+            let duration = start_time.elapsed().as_secs_f64();
+            let report = PerformanceReport::new(
+                results.len(),
+                success_count as usize,
+                error_count as usize,
+                duration,
+            );
+            report.display();
 
             // Shutdown scraper
             scraper.shutdown().await;
