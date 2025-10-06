@@ -4,21 +4,21 @@ use rand::Rng;
 use thirtyfour::{By, DesiredCapabilities, WebDriver, WebElement};
 use tokio::time::{sleep, Duration};
 
-// Delay patterns for human-like behavior
+// Delay patterns for human-like behavior (more conservative timing)
 #[derive(Clone)]
 enum DelayPattern {
-    Quick,  // 1-3 seconds
-    Normal, // 3-7 seconds
-    Slow,   // 7-15 seconds
+    Quick,  // 2-4 seconds (increased from 1-3)
+    Normal, // 4-8 seconds (increased from 3-7)
+    Slow,   // 8-18 seconds (increased from 7-15)
 }
 
 impl DelayPattern {
     async fn wait(&self) {
         let mut rng = rand::thread_rng();
         let delay_ms = match self {
-            Self::Quick => rng.gen_range(1000..2000),
-            Self::Normal => rng.gen_range(2000..4000),
-            Self::Slow => rng.gen_range(4000..10000),
+            Self::Quick => rng.gen_range(2000..4000),   // More conservative
+            Self::Normal => rng.gen_range(4000..8000),  // Doubled
+            Self::Slow => rng.gen_range(8000..18000),   // Longer delays
         };
 
         // Add extra jitter: ±20%
@@ -35,6 +35,7 @@ impl DelayPattern {
             Self::Normal, // More likely to be normal
             Self::Normal,
             Self::Slow,
+            Self::Slow,   // Increased probability of slow pattern
         ];
 
         patterns.choose(&mut rand::thread_rng()).unwrap().clone()
@@ -96,10 +97,10 @@ pub struct ScraperEngine {
 
 // Helper functions for human-like behavior
 impl ScraperEngine {
-    // Random scrolling to simulate human reading
+    // Random scrolling to simulate human reading (more conservative)
     async fn random_scroll(driver: &WebDriver) -> Result<()> {
         let mut rng = rand::thread_rng();
-        let num_scrolls = rng.gen_range(2..6);
+        let num_scrolls = rng.gen_range(3..8);  // More scrolls to appear more natural
 
         for _ in 0..num_scrolls {
             let scroll_amount = rng.gen_range(200..800);
@@ -108,8 +109,8 @@ impl ScraperEngine {
                 .execute(&format!("window.scrollBy(0, {});", scroll_amount), vec![])
                 .await?;
 
-            // Wait between scrolls (reading time)
-            sleep(Duration::from_millis(rng.gen_range(300..1000))).await;
+            // Wait between scrolls (reading time) - increased for more natural behavior
+            sleep(Duration::from_millis(rng.gen_range(800..2000))).await;  // Increased from 300-1000ms
         }
 
         Ok(())
@@ -119,11 +120,11 @@ impl ScraperEngine {
     async fn random_mouse_movements(_driver: &WebDriver) -> Result<()> {
         let mut rng = rand::thread_rng();
 
-        // Simulate mouse movement with JavaScript instead
-        let movements = rng.gen_range(1..4);
+        // Simulate mouse movement with JavaScript instead (more conservative pauses)
+        let movements = rng.gen_range(2..6);  // More movements
         for _ in 0..movements {
-            // Random pause to simulate mouse movements
-            sleep(Duration::from_millis(rng.gen_range(200..800))).await;
+            // Random pause to simulate mouse movements (longer pauses)
+            sleep(Duration::from_millis(rng.gen_range(500..1500))).await;  // Increased from 200-800ms
         }
 
         Ok(())
@@ -235,15 +236,15 @@ impl ScraperEngine {
 
                 tracing::info!("Launching concurrent job for: {}", number);
 
-                // Calculate stagger delay with human-like variation
+                // Calculate stagger delay with human-like variation (more conservative)
                 let mut rng = rand::thread_rng();
                 // Use exponentially distributed delays to be more human-like
                 let base_delay = match i {
                     0 => 0, // First job starts immediately
                     _ => {
-                        // Subsequent jobs have increasingly random delays
-                        let min = 3000 + (i as u64 * 1000);
-                        let max = 7000 + (i as u64 * 2000);
+                        // Subsequent jobs have increasingly random delays (more conservative)
+                        let min = 6000 + (i as u64 * 2000);  // Doubled from 3000 + 1000
+                        let max = 12000 + (i as u64 * 3000); // Increased from 7000 + 2000
                         rng.gen_range(min..=max)
                     }
                 };
@@ -309,10 +310,10 @@ impl ScraperEngine {
                 results.push(scraper_result);
             }
 
-            // Add delay between chunks to avoid overwhelming the server
+            // Add longer delay between chunks to avoid overwhelming the server
             if chunk.len() == self.config.max_concurrent && completed < total {
                 let mut rng = rand::thread_rng();
-                let chunk_delay = rng.gen_range(3000..=5000);
+                let chunk_delay = rng.gen_range(8000..=15000);  // Increased from 3-5s to 8-15s
                 tracing::info!("Waiting {}ms before processing next chunk", chunk_delay);
                 sleep(Duration::from_millis(chunk_delay)).await;
             }
@@ -358,7 +359,7 @@ impl ScraperEngine {
         // Cookie handling logic (extracted from scrape_iptu)
         tracing::info!("Looking for cookie consent modal...");
 
-        sleep(Duration::from_secs(2)).await;
+        sleep(Duration::from_secs(4)).await;  // Increased from 2 to 4 seconds
 
         let mut cookie_handled = false;
         let max_attempts = 3;
@@ -391,7 +392,7 @@ impl ScraperEngine {
 
             if let Ok(result) = driver.execute(js_direct_click, vec![]).await {
                 tracing::info!("JavaScript cookie consent result: {:?}", result);
-                sleep(Duration::from_secs(2)).await;
+                sleep(Duration::from_secs(3)).await;  // Increased from 2 to 3 seconds
 
                 let check_modal = r#"
                     var buttons = document.querySelectorAll('input[type="button"]');
@@ -415,7 +416,7 @@ impl ScraperEngine {
             }
 
             if attempt < max_attempts && !cookie_handled {
-                sleep(Duration::from_secs(1)).await;
+                sleep(Duration::from_secs(2)).await;  // Increased from 1 to 2 seconds
             }
         }
 
@@ -444,23 +445,33 @@ impl ScraperEngine {
         }
 
         tracing::info!("Filling contributor number: {}", parts);
+
+        let mut rng = rand::thread_rng();
+
         inputs[0].clear().await?;
+        sleep(Duration::from_millis(rng.gen_range(300..700))).await;  // Delay before typing
         inputs[0].send_keys(&parts[0..3]).await?;
         tracing::info!("Filled field 1: {}", &parts[0..3]);
+        sleep(Duration::from_millis(rng.gen_range(400..900))).await;  // Delay after typing
 
         inputs[1].clear().await?;
+        sleep(Duration::from_millis(rng.gen_range(300..700))).await;
         inputs[1].send_keys(&parts[3..6]).await?;
         tracing::info!("Filled field 2: {}", &parts[3..6]);
+        sleep(Duration::from_millis(rng.gen_range(400..900))).await;
 
         inputs[2].clear().await?;
+        sleep(Duration::from_millis(rng.gen_range(300..700))).await;
         inputs[2].send_keys(&parts[6..10]).await?;
         tracing::info!("Filled field 3: {}", &parts[6..10]);
+        sleep(Duration::from_millis(rng.gen_range(400..900))).await;
 
         inputs[3].clear().await?;
+        sleep(Duration::from_millis(rng.gen_range(300..700))).await;
         inputs[3].send_keys(&parts[10..11]).await?;
         tracing::info!("Filled field 4: {}", &parts[10..11]);
 
-        sleep(Duration::from_secs(2)).await;
+        sleep(Duration::from_secs(3)).await;  // Increased from 2 to 3 seconds
 
         // Submit form
         tracing::info!("Submitting form...");
@@ -479,7 +490,7 @@ impl ScraperEngine {
         }
 
         tracing::info!("Waiting for results page to load...");
-        sleep(Duration::from_secs(8)).await;
+        sleep(Duration::from_secs(12)).await;  // Increased from 8 to 12 seconds for more conservative loading
 
         let page_content = driver.source().await?;
         let current_url = driver.current_url().await?;
