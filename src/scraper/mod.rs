@@ -515,6 +515,10 @@ impl ScraperEngine {
     async fn extract_data_static(driver: &WebDriver) -> Result<IPTUData> {
         let mut data = IPTUData::default();
 
+        // Wait for page to fully load and stabilize (additional wait for dynamic content)
+        tracing::info!("Waiting for page content to stabilize...");
+        sleep(Duration::from_secs(5)).await;
+
         // Helper function
         async fn get_element_value(elem: &WebElement) -> Option<String> {
             if let Ok(Some(value)) = elem.prop("value").await {
@@ -535,25 +539,37 @@ impl ScraperEngine {
             None
         }
 
-        // Extract fields using the correct field names from the HTML
+        // Helper function to wait for element with retries
+        async fn find_element_with_retry(driver: &WebDriver, name: &str, max_attempts: u32) -> Option<WebElement> {
+            for attempt in 1..=max_attempts {
+                if let Ok(elem) = driver.find(By::Name(name)).await {
+                    tracing::debug!("Found element '{}' on attempt {}", name, attempt);
+                    return Some(elem);
+                }
+                if attempt < max_attempts {
+                    tracing::debug!("Element '{}' not found, retry {}/{}", name, attempt, max_attempts);
+                    sleep(Duration::from_secs(2)).await;
+                }
+            }
+            tracing::warn!("Could not find element '{}' after {} attempts", name, max_attempts);
+            None
+        }
+
+        // Extract fields using the correct field names from the HTML with retries
         // Número do IPTU
-        if let Ok(elem) = driver.find(By::Name("txtNumIPTU")).await {
+        if let Some(elem) = find_element_with_retry(driver, "txtNumIPTU", 3).await {
             data.numero_cadastro = get_element_value(&elem).await;
             tracing::debug!("Found txtNumIPTU: {:?}", data.numero_cadastro);
-        } else {
-            tracing::warn!("Could not find txtNumIPTU element");
         }
 
         // Nome do Proprietário
-        if let Ok(elem) = driver.find(By::Name("txtProprietarioNome")).await {
+        if let Some(elem) = find_element_with_retry(driver, "txtProprietarioNome", 3).await {
             data.nome_proprietario = get_element_value(&elem).await;
             tracing::debug!("Found txtProprietarioNome: {:?}", data.nome_proprietario);
-        } else {
-            tracing::warn!("Could not find txtProprietarioNome element");
         }
 
         // Nome do Compromissário
-        if let Ok(elem) = driver.find(By::Name("txtCompromissarioNome")).await {
+        if let Some(elem) = find_element_with_retry(driver, "txtCompromissarioNome", 2).await {
             data.nome_compromissario = get_element_value(&elem).await;
             tracing::debug!(
                 "Found txtCompromissarioNome: {:?}",
@@ -564,23 +580,19 @@ impl ScraperEngine {
         }
 
         // Endereço (logradouro)
-        if let Ok(elem) = driver.find(By::Name("txtEndereco")).await {
+        if let Some(elem) = find_element_with_retry(driver, "txtEndereco", 3).await {
             data.endereco = get_element_value(&elem).await;
             tracing::debug!("Found txtEndereco: {:?}", data.endereco);
-        } else {
-            tracing::warn!("Could not find txtEndereco element");
         }
 
         // Número do endereço
-        if let Ok(elem) = driver.find(By::Name("txtNumero")).await {
+        if let Some(elem) = find_element_with_retry(driver, "txtNumero", 3).await {
             data.numero = get_element_value(&elem).await;
             tracing::debug!("Found txtNumero: {:?}", data.numero);
-        } else {
-            tracing::warn!("Could not find txtNumero element");
         }
 
         // Complemento
-        if let Ok(elem) = driver.find(By::Name("txtComplemento")).await {
+        if let Some(elem) = find_element_with_retry(driver, "txtComplemento", 2).await {
             data.complemento = get_element_value(&elem).await;
             tracing::debug!("Found txtComplemento: {:?}", data.complemento);
         } else {
@@ -588,19 +600,15 @@ impl ScraperEngine {
         }
 
         // Bairro
-        if let Ok(elem) = driver.find(By::Name("txtBairro")).await {
+        if let Some(elem) = find_element_with_retry(driver, "txtBairro", 3).await {
             data.bairro = get_element_value(&elem).await;
             tracing::debug!("Found txtBairro: {:?}", data.bairro);
-        } else {
-            tracing::warn!("Could not find txtBairro element");
         }
 
         // CEP
-        if let Ok(elem) = driver.find(By::Name("txtCepImovel")).await {
+        if let Some(elem) = find_element_with_retry(driver, "txtCepImovel", 3).await {
             data.cep = get_element_value(&elem).await;
             tracing::debug!("Found txtCepImovel: {:?}", data.cep);
-        } else {
-            tracing::warn!("Could not find txtCepImovel element");
         }
 
         Ok(data)
