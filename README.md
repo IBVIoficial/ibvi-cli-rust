@@ -91,7 +91,3 @@ The CLI expects the following Supabase tables:
 - `iptus_list`: Queue of contributor numbers to process
 - `iptus`: Results table
 - `batches`: Batch tracking table
-
-## License
-
-MIT
