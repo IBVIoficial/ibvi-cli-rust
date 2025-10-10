@@ -58,10 +58,8 @@ impl SupabaseClient {
     }
 
     pub async fn fetch_pending_jobs(&self, limit: usize) -> Result<Vec<PendingJob>> {
-        // Use service role key if available, otherwise use anon key
         let auth_key: &String = self.service_role_key.as_ref().unwrap_or(&self.api_key);
 
-        // First try to fetch from iptus_list_priority
         tracing::info!("Checking iptus_list_priority table for pending jobs...");
         let priority_url: String = format!("{}/rest/v1/iptus_list_priority", self.base_url);
 
@@ -97,7 +95,7 @@ impl SupabaseClient {
                     "Found {} priority jobs in iptus_list_priority",
                     priority_jobs.len()
                 );
-                // Mark these jobs as coming from priority table
+
                 for job in &mut priority_jobs {
                     job.from_priority_table = true;
                 }
@@ -112,7 +110,6 @@ impl SupabaseClient {
             tracing::warn!("Could not fetch from iptus_list_priority: {}", error_text);
         }
 
-        // If no priority jobs or priority table doesn't exist, fetch from regular iptus_list
         let url = format!("{}/rest/v1/iptus_list", self.base_url);
 
         let response = self
@@ -165,24 +162,26 @@ impl SupabaseClient {
         };
         let url = format!("{}/rest/v1/{}", self.base_url, table_name);
 
-        // Use service role key if available, otherwise use anon key
         let auth_key = self.service_role_key.as_ref().unwrap_or(&self.api_key);
 
         let update_data = serde_json::json!({
             "status": "p",  // p for processing
         });
 
-        tracing::info!("Claiming {} jobs from {} (marking all as 'p' in a single request)", job_ids.len(), table_name);
+        tracing::info!(
+            "Claiming {} jobs from {} (marking all as 'p' in a single request)",
+            job_ids.len(),
+            table_name
+        );
 
-        // Build the IN clause for all contributor numbers
         let in_clause = job_ids
             .iter()
             .map(|id| format!("\"{}\"", id))
             .collect::<Vec<_>>()
             .join(",");
 
-        // Update all jobs at once using the IN operator
-        let response = self.client
+        let response = self
+            .client
             .patch(&url)
             .header("apikey", auth_key)
             .header("Authorization", format!("Bearer {}", auth_key))
@@ -197,7 +196,10 @@ impl SupabaseClient {
             anyhow::bail!("Failed to claim jobs: {}", error_text);
         }
 
-        tracing::info!("Successfully claimed {} jobs (all marked as 'p')", job_ids.len());
+        tracing::info!(
+            "Successfully claimed {} jobs (all marked as 'p')",
+            job_ids.len()
+        );
 
         Ok(())
     }
@@ -205,7 +207,6 @@ impl SupabaseClient {
     pub async fn upload_results(&self, results: Vec<IPTUResult>) -> Result<usize> {
         let url = format!("{}/rest/v1/iptus", self.base_url);
 
-        // Use service role key if available, otherwise use anon key
         let auth_key = self.service_role_key.as_ref().unwrap_or(&self.api_key);
 
         let response = self
@@ -233,7 +234,6 @@ impl SupabaseClient {
 
         let batch_id = uuid::Uuid::new_v4().to_string();
 
-        // Create batch without created_at field (Supabase will auto-generate it)
         let batch_data = serde_json::json!({
             "id": batch_id,
             "total": total,
@@ -330,11 +330,10 @@ impl SupabaseClient {
         };
         let url = format!("{}/rest/v1/{}", self.base_url, table_name);
 
-        // Use service role key if available, otherwise use anon key
         let auth_key = self.service_role_key.as_ref().unwrap_or(&self.api_key);
 
         let update_data = serde_json::json!({
-            "status": "s",  // s for success
+            "status": "s",
         });
 
         for number in contributor_numbers {
@@ -364,7 +363,6 @@ impl SupabaseClient {
         };
         let url = format!("{}/rest/v1/{}", self.base_url, table_name);
 
-        // Use service role key if available, otherwise use anon key
         let auth_key = self.service_role_key.as_ref().unwrap_or(&self.api_key);
 
         let update_data = serde_json::json!({
@@ -389,7 +387,6 @@ impl SupabaseClient {
     pub async fn get_results(&self, limit: i32, offset: i32) -> Result<Vec<IPTUResult>> {
         let url = format!("{}/rest/v1/iptus", self.base_url);
 
-        // Use service role key if available, otherwise use anon key
         let auth_key = self.service_role_key.as_ref().unwrap_or(&self.api_key);
 
         let response = self

@@ -7,24 +7,22 @@ use thirtyfour::{By, DesiredCapabilities, WebDriver, WebElement};
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 
-// Delay patterns for human-like behavior (more conservative timing)
 #[derive(Clone)]
 enum DelayPattern {
-    Quick,  // 2-4 seconds (increased from 1-3)
-    Normal, // 4-8 seconds (increased from 3-7)
-    Slow,   // 8-18 seconds (increased from 7-15)
+    Quick,
+    Normal,
+    Slow,
 }
 
 impl DelayPattern {
     async fn wait(&self) {
         let mut rng = rand::thread_rng();
         let delay_ms = match self {
-            Self::Quick => rng.gen_range(3000..4000), // More conservative
-            Self::Normal => rng.gen_range(4000..8000), // Doubled
-            Self::Slow => rng.gen_range(8000..18000), // Longer delays
+            Self::Quick => rng.gen_range(3000..4000),
+            Self::Normal => rng.gen_range(4000..8000),
+            Self::Slow => rng.gen_range(8000..18000),
         };
 
-        // Add extra jitter: ±20%
         let jitter_percent = rng.gen_range(-20..=20) as f64 / 100.0;
         let final_delay = (delay_ms as f64 * (1.0 + jitter_percent)) as u64;
 
@@ -35,17 +33,16 @@ impl DelayPattern {
         let patterns = [
             Self::Quick,
             Self::Normal,
-            Self::Normal, // More likely to be normal
+            Self::Normal,
             Self::Normal,
             Self::Slow,
-            Self::Slow, // Increased probability of slow pattern
+            Self::Slow,
         ];
 
         patterns.choose(&mut rand::thread_rng()).unwrap().clone()
     }
 }
 
-// ScraperResult moved inline
 #[derive(Debug, Clone)]
 pub struct ScraperResult {
     pub contributor_number: String,
@@ -61,7 +58,6 @@ pub struct ScraperResult {
     pub error: Option<String>,
 }
 
-// Data structure for IPTU information
 #[derive(Debug, Default)]
 struct IPTUData {
     numero_cadastro: Option<String>,
@@ -74,17 +70,11 @@ struct IPTUData {
     cep: Option<String>,
 }
 
-// Failure tracker for cooldown management
-// Implements the following logic:
-// - Tracks failures within a 10-minute window
-// - If 2+ failures occur within 10 minutes, triggers a 20-minute cooldown
-// - Continues applying 20-minute cooldowns on subsequent failures
-// - Resets all counters upon first success
 #[derive(Debug, Clone)]
 struct FailureTracker {
     failure_count: usize,
-    failure_timestamps: Vec<u64>, // Unix timestamps in seconds
-    last_cooldown: Option<u64>,   // Timestamp of last cooldown
+    failure_timestamps: Vec<u64>,
+    last_cooldown: Option<u64>,
     cooldown_active: bool,
 }
 
@@ -105,18 +95,14 @@ impl FailureTracker {
             .as_secs()
     }
 
-    // Check if we need to cooldown (2 failures within 10 minutes)
     fn should_cooldown(&mut self) -> bool {
         let now = Self::get_current_timestamp();
 
-        // Clean old timestamps (older than 10 minutes)
         self.failure_timestamps.retain(|&ts| now - ts < 600);
 
-        // Check if we have 2+ failures in the last 10 minutes
         self.failure_timestamps.len() >= 2
     }
 
-    // Record a failure
     fn record_failure(&mut self) {
         let now = Self::get_current_timestamp();
         self.failure_timestamps.push(now);
@@ -129,10 +115,12 @@ impl FailureTracker {
         );
     }
 
-    // Record a success - reset counters
     fn record_success(&mut self) {
         if self.failure_count > 0 {
-            tracing::info!("✅ Success after {} failures - resetting counters", self.failure_count);
+            tracing::info!(
+                "✅ Success after {} failures - resetting counters",
+                self.failure_count
+            );
         }
         self.failure_count = 0;
         self.failure_timestamps.clear();
@@ -140,19 +128,17 @@ impl FailureTracker {
         self.last_cooldown = None;
     }
 
-    // Apply cooldown if needed
     async fn apply_cooldown_if_needed(&mut self) {
         if self.should_cooldown() {
             self.cooldown_active = true;
-            let cooldown_duration = 1200; // 20 minutes in seconds
+            let cooldown_duration = 1800;
 
             tracing::error!("🚫 2 failures detected within 10 minutes!");
-            tracing::warn!("⏸️  Initiating 20-minute cooldown period to avoid rate limiting...");
+            tracing::warn!("⏸️  Initiating 30-minute cooldown period to avoid rate limiting...");
             tracing::info!("💤 Sleeping for {} seconds", cooldown_duration);
 
             self.last_cooldown = Some(Self::get_current_timestamp());
 
-            // Show progress every 2 minutes
             for i in 0..10 {
                 sleep(Duration::from_secs(120)).await;
                 let remaining = (10 - i - 1) * 2;
@@ -163,7 +149,6 @@ impl FailureTracker {
 
             tracing::info!("✅ Cooldown period complete - resuming operations");
 
-            // Clear failure timestamps after cooldown
             self.failure_timestamps.clear();
             self.cooldown_active = false;
         }
@@ -216,11 +201,9 @@ impl ScraperEngine {
         Ok(())
     }
 
-    // Random mouse movements to avoid detection (simplified without action_chain)
     async fn random_mouse_movements(_driver: &WebDriver) -> Result<()> {
         let mut rng = rand::thread_rng();
 
-        // Simulate mouse movement with JavaScript instead (more conservative pauses)
         let movements = rng.gen_range(2..6); // More movements
         for _ in 0..movements {
             // Random pause to simulate mouse movements (longer pauses)
@@ -235,7 +218,6 @@ impl ScraperEngine {
     pub async fn new(config: ScraperConfig) -> Result<Self> {
         let mut driver_pool = Vec::new();
 
-        // User-Agent strings for rotation
         let user_agents = vec![
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -244,7 +226,6 @@ impl ScraperEngine {
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
         ];
 
-        // Create WebDriver pool
         for i in 0..config.max_concurrent {
             let mut caps = DesiredCapabilities::chrome();
             if config.headless {
@@ -255,16 +236,13 @@ impl ScraperEngine {
             caps.add_chrome_arg("--disable-gpu")?;
             caps.add_chrome_arg("--window-size=1920,1080")?;
 
-            // Rotate User-Agent for each driver instance
             let user_agent = &user_agents[i % user_agents.len()];
             caps.add_chrome_arg(&format!("--user-agent={}", user_agent))?;
 
-            // Additional anti-detection measures
             caps.add_chrome_arg("--disable-blink-features=AutomationControlled")?;
 
             let driver = WebDriver::new("http://localhost:9515", caps).await?;
 
-            // Inject JavaScript to hide automation indicators
             let _ = driver
                 .execute(
                     r#"
@@ -312,13 +290,11 @@ impl ScraperEngine {
         let total = jobs.len();
         let mut completed = 0;
 
-        // Log the jobs being processed
         tracing::info!("Processing {} jobs total", total);
         for (idx, job) in jobs.iter().enumerate() {
             tracing::info!("Job {}: {}", idx + 1, job);
         }
 
-        // Calculate delay between requests to respect rate limit
         let _delay_ms = if self.config.rate_limit_per_hour > 0 {
             (3600 * 1000) / self.config.rate_limit_per_hour as u64
         } else {
@@ -328,7 +304,6 @@ impl ScraperEngine {
         use futures::future::join_all;
 
         for chunk in jobs.chunks(self.config.max_concurrent) {
-            // Check if we need to apply cooldown before processing this chunk
             {
                 let mut tracker = self.failure_tracker.lock().await;
                 tracker.apply_cooldown_if_needed().await;
@@ -336,30 +311,25 @@ impl ScraperEngine {
 
             let mut tasks = Vec::new();
 
-            // Launch all jobs in this chunk concurrently
             for (i, contributor_number) in chunk.iter().enumerate() {
                 let driver = self.driver_pool[i].clone();
                 let number = contributor_number.clone();
 
                 tracing::info!("Launching concurrent job for: {}", number);
 
-                // Calculate stagger delay with human-like variation (more conservative)
                 let mut rng = rand::thread_rng();
-                // Use exponentially distributed delays to be more human-like
+
                 let base_delay = match i {
-                    0 => 0, // First job starts immediately
+                    0 => 0,
                     _ => {
-                        // Subsequent jobs have increasingly random delays (more conservative)
-                        let min = 6000 + (i as u64 * 2000); // Doubled from 3000 + 1000
-                        let max = 12000 + (i as u64 * 3000); // Increased from 7000 + 2000
+                        let min = 6000 + (i as u64 * 2000);
+                        let max = 12000 + (i as u64 * 3000);
                         rng.gen_range(min..=max)
                     }
                 };
                 let stagger_delay = base_delay;
 
-                // Create a future for each job
                 let task = async move {
-                    // Apply the stagger delay for all jobs except the first one
                     if stagger_delay > 0 {
                         tracing::info!(
                             "Waiting {}ms before starting job: {}",
@@ -371,7 +341,6 @@ impl ScraperEngine {
 
                     tracing::info!("Processing job: {}", number);
 
-                    // Process job using the static scrape function
                     let result = Self::scrape_iptu_static(&driver, &number).await;
 
                     let scraper_result = ScraperResult {
@@ -403,35 +372,29 @@ impl ScraperEngine {
                 tasks.push(task);
             }
 
-            // Wait for all tasks in the chunk to complete
             let chunk_results = join_all(tasks).await;
 
-            // Process results and call callbacks
             for (number, scraper_result) in chunk_results {
                 completed += 1;
                 tracing::info!("Completed job {}/{}: {}", completed, total, number);
 
-                // Track failures and successes
                 let mut tracker = self.failure_tracker.lock().await;
                 if scraper_result.success {
                     tracker.record_success();
                 } else {
                     tracker.record_failure();
-                    // Apply cooldown if we have 2 failures within 10 minutes
                     tracker.apply_cooldown_if_needed().await;
                 }
-                drop(tracker); // Explicitly drop the lock
+                drop(tracker);
 
-                // Call the callback with the result
                 callback(&scraper_result, completed, total);
 
                 results.push(scraper_result);
             }
 
-            // Add delay between chunks (8-12 seconds as requested)
             if chunk.len() == self.config.max_concurrent && completed < total {
                 let mut rng = rand::thread_rng();
-                let chunk_delay = rng.gen_range(8000..=12000); // 8-12 seconds between chunks
+                let chunk_delay = rng.gen_range(8000..=12000);
                 tracing::info!("Waiting {}ms before processing next chunk", chunk_delay);
                 sleep(Duration::from_millis(chunk_delay)).await;
             }
@@ -440,33 +403,26 @@ impl ScraperEngine {
         results
     }
 
-    // Static version for concurrent processing
     async fn scrape_iptu_static(driver: &WebDriver, contributor_number: &str) -> Result<IPTUData> {
         tracing::info!("Starting scrape for: {}", contributor_number);
 
-        // Navigate to São Paulo IPTU website
         driver
             .goto("https://www3.prefeitura.sp.gov.br/sf8663/formsinternet/principal.aspx")
             .await?;
 
-        // Human-like delay pattern after page load
         DelayPattern::random().wait().await;
 
-        // Sometimes do random mouse movements (30% chance)
         let mut rng = rand::thread_rng();
         if rng.gen_bool(0.3) {
             let _ = Self::random_mouse_movements(driver).await;
         }
 
-        // Handle cookie consent and fill form (same logic as scrape_iptu)
         let _page_content = Self::handle_cookie_and_fill_form(driver, contributor_number).await?;
 
-        // Occasionally scroll the page to simulate reading (40% chance)
         if rng.gen_bool(0.4) {
             let _ = Self::random_scroll(driver).await;
         }
 
-        // Extract data using static method
         Self::extract_data_static(driver).await
     }
 
@@ -474,10 +430,9 @@ impl ScraperEngine {
         driver: &WebDriver,
         contributor_number: &str,
     ) -> Result<String> {
-        // Cookie handling logic (extracted from scrape_iptu)
         tracing::info!("Looking for cookie consent modal...");
 
-        sleep(Duration::from_secs(4)).await; // Increased from 2 to 4 seconds
+        sleep(Duration::from_secs(4)).await;
 
         let mut cookie_handled = false;
         let max_attempts = 3;
@@ -534,7 +489,7 @@ impl ScraperEngine {
             }
 
             if attempt < max_attempts && !cookie_handled {
-                sleep(Duration::from_secs(2)).await; // Increased from 1 to 2 seconds
+                sleep(Duration::from_secs(2)).await;
             }
         }
 
@@ -544,7 +499,6 @@ impl ScraperEngine {
             tracing::warn!("Could not dismiss cookie modal, continuing anyway");
         }
 
-        // Fill form logic
         let parts = contributor_number
             .replace(".", "")
             .replace("-", "")
@@ -567,10 +521,10 @@ impl ScraperEngine {
         let mut rng = rand::thread_rng();
 
         inputs[0].clear().await?;
-        sleep(Duration::from_millis(rng.gen_range(300..700))).await; // Delay before typing
+        sleep(Duration::from_millis(rng.gen_range(300..700))).await;
         inputs[0].send_keys(&parts[0..3]).await?;
         tracing::info!("Filled field 1: {}", &parts[0..3]);
-        sleep(Duration::from_millis(rng.gen_range(400..900))).await; // Delay after typing
+        sleep(Duration::from_millis(rng.gen_range(400..900))).await;
 
         inputs[1].clear().await?;
         sleep(Duration::from_millis(rng.gen_range(300..700))).await;
@@ -589,9 +543,8 @@ impl ScraperEngine {
         inputs[3].send_keys(&parts[10..11]).await?;
         tracing::info!("Filled field 4: {}", &parts[10..11]);
 
-        sleep(Duration::from_secs(3)).await; // Increased from 2 to 3 seconds
+        sleep(Duration::from_secs(3)).await;
 
-        // Submit form
         tracing::info!("Submitting form...");
 
         let click_script = r#"
@@ -608,13 +561,12 @@ impl ScraperEngine {
         }
 
         tracing::info!("Waiting for results page to load...");
-        sleep(Duration::from_secs(12)).await; // Increased from 8 to 12 seconds for more conservative loading
+        sleep(Duration::from_secs(12)).await;
 
         let page_content = driver.source().await?;
         let current_url = driver.current_url().await?;
         tracing::info!("Current URL after form submit: {}", current_url);
 
-        // Save debug HTML
         if let Ok(home) = std::env::var("HOME") {
             let debug_file = format!(
                 "{}/Desktop/iptus/iptu_debug_{}.html",
@@ -633,11 +585,9 @@ impl ScraperEngine {
     async fn extract_data_static(driver: &WebDriver) -> Result<IPTUData> {
         let mut data = IPTUData::default();
 
-        // Wait for page to fully load and stabilize (additional wait for dynamic content)
         tracing::info!("Waiting for page content to stabilize...");
         sleep(Duration::from_secs(5)).await;
 
-        // Helper function
         async fn get_element_value(elem: &WebElement) -> Option<String> {
             if let Ok(Some(value)) = elem.prop("value").await {
                 if !value.is_empty() {
@@ -657,20 +607,16 @@ impl ScraperEngine {
             None
         }
 
-        // First, check if critical elements exist to determine if page loaded correctly
         let has_iptu = driver.find(By::Name("txtNumIPTU")).await.is_ok();
         let has_proprietario = driver.find(By::Name("txtProprietarioNome")).await.is_ok();
 
         if !has_iptu && !has_proprietario {
-            // Page failed to load properly - trigger cooldown
             tracing::error!("Critical elements not found - page failed to load properly");
             tracing::warn!("⏸️  Pausing for 120 seconds to avoid rate limiting...");
             sleep(Duration::from_secs(120)).await;
             anyhow::bail!("Page did not load results correctly - server may be rate limiting");
         }
 
-        // Extract fields using the correct field names from the HTML (no retries)
-        // Número do IPTU
         if let Ok(elem) = driver.find(By::Name("txtNumIPTU")).await {
             data.numero_cadastro = get_element_value(&elem).await;
             tracing::debug!("Found txtNumIPTU: {:?}", data.numero_cadastro);
@@ -678,7 +624,6 @@ impl ScraperEngine {
             tracing::debug!("txtNumIPTU element not found (empty)");
         }
 
-        // Nome do Proprietário
         if let Ok(elem) = driver.find(By::Name("txtProprietarioNome")).await {
             data.nome_proprietario = get_element_value(&elem).await;
             tracing::debug!("Found txtProprietarioNome: {:?}", data.nome_proprietario);
@@ -686,7 +631,6 @@ impl ScraperEngine {
             tracing::debug!("txtProprietarioNome element not found (empty)");
         }
 
-        // Nome do Compromissário
         if let Ok(elem) = driver.find(By::Name("txtCompromissarioNome")).await {
             data.nome_compromissario = get_element_value(&elem).await;
             tracing::debug!(
@@ -697,7 +641,6 @@ impl ScraperEngine {
             tracing::debug!("No txtCompromissarioNome element (may be empty)");
         }
 
-        // Endereço (logradouro)
         if let Ok(elem) = driver.find(By::Name("txtEndereco")).await {
             data.endereco = get_element_value(&elem).await;
             tracing::debug!("Found txtEndereco: {:?}", data.endereco);
@@ -705,7 +648,6 @@ impl ScraperEngine {
             tracing::debug!("txtEndereco element not found (empty)");
         }
 
-        // Número do endereço
         if let Ok(elem) = driver.find(By::Name("txtNumero")).await {
             data.numero = get_element_value(&elem).await;
             tracing::debug!("Found txtNumero: {:?}", data.numero);
@@ -713,7 +655,6 @@ impl ScraperEngine {
             tracing::debug!("txtNumero element not found (empty)");
         }
 
-        // Complemento
         if let Ok(elem) = driver.find(By::Name("txtComplemento")).await {
             data.complemento = get_element_value(&elem).await;
             tracing::debug!("Found txtComplemento: {:?}", data.complemento);
@@ -721,7 +662,6 @@ impl ScraperEngine {
             tracing::debug!("No txtComplemento element (may be empty)");
         }
 
-        // Bairro
         if let Ok(elem) = driver.find(By::Name("txtBairro")).await {
             data.bairro = get_element_value(&elem).await;
             tracing::debug!("Found txtBairro: {:?}", data.bairro);
@@ -729,7 +669,6 @@ impl ScraperEngine {
             tracing::debug!("txtBairro element not found (empty)");
         }
 
-        // CEP
         if let Ok(elem) = driver.find(By::Name("txtCepImovel")).await {
             data.cep = get_element_value(&elem).await;
             tracing::debug!("Found txtCepImovel: {:?}", data.cep);
@@ -752,7 +691,6 @@ impl ScraperEngine {
 mod tests {
     use super::*;
 
-    // Tests for FailureTracker
     #[test]
     fn test_failure_tracker_new() {
         let tracker = FailureTracker::new();
@@ -779,12 +717,10 @@ mod tests {
     fn test_failure_tracker_record_success() {
         let mut tracker = FailureTracker::new();
 
-        // Add some failures
         tracker.record_failure();
         tracker.record_failure();
         assert_eq!(tracker.failure_count, 2);
 
-        // Record success should reset everything
         tracker.record_success();
         assert_eq!(tracker.failure_count, 0);
         assert_eq!(tracker.failure_timestamps.len(), 0);
@@ -795,11 +731,9 @@ mod tests {
     fn test_should_cooldown_with_two_recent_failures() {
         let mut tracker = FailureTracker::new();
 
-        // Add two failures
         tracker.record_failure();
         tracker.record_failure();
 
-        // Should trigger cooldown
         assert!(tracker.should_cooldown());
     }
 
@@ -807,10 +741,8 @@ mod tests {
     fn test_should_not_cooldown_with_one_failure() {
         let mut tracker = FailureTracker::new();
 
-        // Add only one failure
         tracker.record_failure();
 
-        // Should NOT trigger cooldown
         assert!(!tracker.should_cooldown());
     }
 
@@ -818,12 +750,10 @@ mod tests {
     fn test_old_failures_are_cleaned_up() {
         let mut tracker = FailureTracker::new();
 
-        // Manually add old timestamp (more than 10 minutes ago)
-        let old_timestamp = FailureTracker::get_current_timestamp() - 700; // 11+ minutes ago
+        let old_timestamp = FailureTracker::get_current_timestamp() - 700;
         tracker.failure_timestamps.push(old_timestamp);
         tracker.failure_timestamps.push(old_timestamp);
 
-        // Old failures should be cleaned up and not trigger cooldown
         assert!(!tracker.should_cooldown());
         assert_eq!(tracker.failure_timestamps.len(), 0);
     }
@@ -832,19 +762,12 @@ mod tests {
     async fn test_apply_cooldown_if_needed() {
         let mut tracker = FailureTracker::new();
 
-        // Add two failures to trigger cooldown
         tracker.record_failure();
         tracker.record_failure();
 
-        // This should trigger cooldown (but we'll use a shorter duration for testing)
-        // Note: In a real test, we'd mock the sleep function
         assert!(tracker.should_cooldown());
-
-        // After cooldown, timestamps should be cleared
-        // (In production code, this happens after 20 minutes)
     }
 
-    // Test for ScraperResult
     #[test]
     fn test_scraper_result_creation() {
         let result = ScraperResult {
@@ -886,13 +809,10 @@ mod tests {
         assert_eq!(result.error, Some("Failed to load page".to_string()));
     }
 
-    // Test for DelayPattern
     #[tokio::test]
     async fn test_delay_pattern_random() {
-        // Test that random delay pattern can be created
         let pattern = DelayPattern::random();
 
-        // Should be one of the valid patterns
         match pattern {
             DelayPattern::Quick | DelayPattern::Normal | DelayPattern::Slow => {
                 // Valid pattern
@@ -901,7 +821,6 @@ mod tests {
         }
     }
 
-    // Test for ScraperConfig
     #[test]
     fn test_scraper_config() {
         let config = ScraperConfig {
@@ -919,15 +838,10 @@ mod tests {
         assert_eq!(config.rate_limit_per_hour, 100);
     }
 
-    // Integration test for failure tracking in ScraperEngine
     #[tokio::test]
     async fn test_scraper_engine_failure_tracking() {
-        // This would require a mock WebDriver setup
-        // For now, we'll test the failure tracker integration concept
-
         let tracker = Arc::new(Mutex::new(FailureTracker::new()));
 
-        // Simulate multiple failures
         {
             let mut t = tracker.lock().await;
             t.record_failure();
@@ -935,7 +849,6 @@ mod tests {
             assert!(t.should_cooldown());
         }
 
-        // Simulate success to reset
         {
             let mut t = tracker.lock().await;
             t.record_success();
@@ -943,16 +856,13 @@ mod tests {
         }
     }
 
-    // Test helper function for timestamp
     #[test]
     fn test_get_current_timestamp() {
         let timestamp = FailureTracker::get_current_timestamp();
 
-        // Timestamp should be a reasonable Unix timestamp (after year 2020)
-        assert!(timestamp > 1577836800); // January 1, 2020
+        assert!(timestamp > 1577836800);
     }
 
-    // Test for concurrent failure tracking
     #[tokio::test]
     async fn test_concurrent_failure_tracking() {
         let tracker = Arc::new(Mutex::new(FailureTracker::new()));
@@ -974,18 +884,15 @@ mod tests {
         handle1.await.unwrap();
         handle2.await.unwrap();
 
-        // Check final state
         let t = tracker.lock().await;
         assert_eq!(t.failure_count, 2);
         assert_eq!(t.failure_timestamps.len(), 2);
     }
 
-    // Test for mixed success and failure scenarios
     #[test]
     fn test_mixed_success_failure_scenarios() {
         let mut tracker = FailureTracker::new();
 
-        // Scenario 1: Failure -> Success -> Failure
         tracker.record_failure();
         assert_eq!(tracker.failure_count, 1);
 
@@ -994,14 +901,13 @@ mod tests {
 
         tracker.record_failure();
         assert_eq!(tracker.failure_count, 1);
-        assert!(!tracker.should_cooldown()); // Only 1 failure, no cooldown
+        assert!(!tracker.should_cooldown());
 
-        // Scenario 2: Multiple failures then success
-        tracker.record_failure(); // Now 2 failures
-        assert!(tracker.should_cooldown()); // Should trigger cooldown
+        tracker.record_failure();
+        assert!(tracker.should_cooldown());
 
         tracker.record_success();
         assert_eq!(tracker.failure_count, 0);
-        assert!(!tracker.should_cooldown()); // Reset after success
+        assert!(!tracker.should_cooldown());
     }
 }

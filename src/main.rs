@@ -106,47 +106,35 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Fetch pending jobs from Supabase and process them
     Process {
-        /// Number of jobs to fetch
         #[arg(short, long, default_value_t = 10)]
         limit: usize,
 
-        /// Number of concurrent scrapers
         #[arg(short, long, default_value_t = 1)]
         concurrent: usize,
 
-        /// Run in headless mode
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         headless: bool,
 
-        /// Rate limit per hour
         #[arg(short, long, default_value_t = 100)]
         rate_limit: usize,
 
-        /// File with contributor numbers (one per line)
         #[arg(short, long)]
         file: Option<String>,
 
-        /// Direct contributor numbers (comma-separated)
         #[arg(long)]
         numbers: Option<String>,
     },
 
-    /// Fetch pending jobs from Supabase (without processing)
     Fetch {
-        /// Number of jobs to fetch
         #[arg(short, long, default_value_t = 10)]
         limit: usize,
     },
 
-    /// Get results from Supabase
     Results {
-        /// Number of results to fetch
         #[arg(short, long, default_value_t = 10)]
         limit: i32,
 
-        /// Offset
         #[arg(short, long, default_value_t = 0)]
         offset: i32,
     },
@@ -167,7 +155,6 @@ async fn process_block(
         total_items
     );
 
-    // Process each item in the block individually
     for (idx, contributor_number) in contributor_numbers.iter().enumerate() {
         let item_num = idx + 1;
         info!(
@@ -175,7 +162,6 @@ async fn process_block(
             item_num, total_items, contributor_number
         );
 
-        // Process single job with scraper
         let job_results = scraper
             .process_batch_with_callback(
                 vec![contributor_number.clone()],
@@ -196,7 +182,6 @@ async fn process_block(
             .await;
 
         if let Some(result) = job_results.into_iter().next() {
-            // Convert to Supabase format and upload
             let now = chrono::Utc::now().to_rfc3339();
             let iptu_result = crate::supabase::IPTUResult {
                 id: Some(uuid::Uuid::new_v4().to_string()),
@@ -216,7 +201,6 @@ async fn process_block(
                 processed_by: Some("cli".to_string()),
             };
 
-            // Upload result to database
             if let Err(e) = client.upload_results(vec![iptu_result]).await {
                 tracing::error!(
                     "  Item {}/{}: Failed to upload result: {}",
@@ -231,7 +215,6 @@ async fn process_block(
                 );
             }
 
-            // Update status from 'p' to 's' (success) or 'e' (error)
             if result.success && result.nome_proprietario.is_some() {
                 info!(
                     "  Item {}/{}: Updating status from 'p' to 's' (success)",
@@ -296,19 +279,16 @@ async fn process_block(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
-    // Load environment variables
     dotenv::dotenv().ok();
 
     let cli = Cli::parse();
 
-    // Get Supabase credentials from environment
     let supabase_url = std::env::var("SUPABASE_URL").expect("SUPABASE_URL must be set");
     let supabase_anon_key =
         std::env::var("SUPABASE_ANON_KEY").expect("SUPABASE_ANON_KEY must be set");
@@ -329,10 +309,8 @@ async fn main() -> Result<()> {
             file,
             numbers,
         } => {
-            // Start timer
             let start_time = Instant::now();
 
-            // Start ChromeDriver
             info!("Attempting to start ChromeDriver...");
             let status = Command::new("sh")
                 .arg("start.chromedriver.sh")
@@ -346,7 +324,6 @@ async fn main() -> Result<()> {
 
             const BLOCK_SIZE: usize = 5;
 
-            // Initialize scraper once
             let config = ScraperConfig {
                 max_concurrent: concurrent,
                 headless,
@@ -368,9 +345,7 @@ async fn main() -> Result<()> {
             let mut total_success = 0;
             let mut total_error = 0;
 
-            // Determine source and process in blocks
             if let Some(file_path) = file {
-                // Read from file
                 info!("Reading contributor numbers from file: {}", file_path);
                 let contents = std::fs::read_to_string(file_path)?;
                 let contributor_numbers: Vec<String> = contents
@@ -383,7 +358,6 @@ async fn main() -> Result<()> {
                     contributor_numbers.len()
                 );
 
-                // Process in blocks
                 for (block_idx, block) in contributor_numbers.chunks(BLOCK_SIZE).enumerate() {
                     let block_num = block_idx + 1;
                     info!(
@@ -392,14 +366,9 @@ async fn main() -> Result<()> {
                         contributor_numbers.len().div_ceil(BLOCK_SIZE)
                     );
 
-                    let results = crate::process_block(
-                        &scraper,
-                        block.to_vec(),
-                        &client_arc,
-                        None,  // No batch ID for file processing
-                        false, // Not from priority table
-                    )
-                    .await?;
+                    let results =
+                        crate::process_block(&scraper, block.to_vec(), &client_arc, None, false)
+                            .await?;
 
                     let block_success = results.iter().filter(|r| r.success).count();
                     let block_error = results.len() - block_success;
@@ -415,7 +384,6 @@ async fn main() -> Result<()> {
 
                     all_results.extend(results);
 
-                    // Add delay between blocks (8-12 seconds)
                     if block_idx < contributor_numbers.chunks(BLOCK_SIZE).count() - 1 {
                         let mut rng = rand::thread_rng();
                         let delay_secs = rng.gen_range(8..=12);
@@ -424,7 +392,6 @@ async fn main() -> Result<()> {
                     }
                 }
             } else if let Some(nums) = numbers {
-                // Parse from comma-separated string
                 info!("Processing provided contributor numbers");
                 let contributor_numbers: Vec<String> = nums
                     .split(',')
@@ -436,7 +403,6 @@ async fn main() -> Result<()> {
                     contributor_numbers.len()
                 );
 
-                // Process in blocks
                 for (block_idx, block) in contributor_numbers.chunks(BLOCK_SIZE).enumerate() {
                     let block_num = block_idx + 1;
                     info!(
@@ -445,14 +411,9 @@ async fn main() -> Result<()> {
                         contributor_numbers.len().div_ceil(BLOCK_SIZE)
                     );
 
-                    let results = crate::process_block(
-                        &scraper,
-                        block.to_vec(),
-                        &client_arc,
-                        None,  // No batch ID for manual processing
-                        false, // Not from priority table
-                    )
-                    .await?;
+                    let results =
+                        crate::process_block(&scraper, block.to_vec(), &client_arc, None, false)
+                            .await?;
 
                     let block_success = results.iter().filter(|r| r.success).count();
                     let block_error = results.len() - block_success;
@@ -468,7 +429,6 @@ async fn main() -> Result<()> {
 
                     all_results.extend(results);
 
-                    // Add delay between blocks (8-12 seconds)
                     if block_idx < contributor_numbers.chunks(BLOCK_SIZE).count() - 1 {
                         let mut rng = rand::thread_rng();
                         let delay_secs = rng.gen_range(8..=12);
@@ -477,13 +437,11 @@ async fn main() -> Result<()> {
                     }
                 }
             } else {
-                // Fetch from Supabase in blocks
                 info!(
                     "Will fetch and process {} items from Supabase in blocks of {}",
                     limit, BLOCK_SIZE
                 );
 
-                // Create batch for entire operation
                 let batch_id = client_arc.create_batch(limit as i32).await?;
                 info!("Created batch: {}", batch_id);
 
@@ -496,7 +454,6 @@ async fn main() -> Result<()> {
                     info!("========== Block {}/{} ==========", block_num, total_blocks);
                     info!("Fetching {} items from Supabase...", block_size);
 
-                    // Fetch block from Supabase
                     let jobs = client_arc.fetch_pending_jobs(block_size).await?;
 
                     if jobs.is_empty() {
@@ -506,18 +463,15 @@ async fn main() -> Result<()> {
 
                     info!("Found {} pending jobs in block {}", jobs.len(), block_num);
 
-                    // Check if jobs are from priority table
                     let from_priority_table =
                         jobs.first().map(|j| j.from_priority_table).unwrap_or(false);
                     if from_priority_table {
                         info!("Processing priority jobs from iptus_list_priority table");
                     }
 
-                    // Extract contributor numbers
                     let contributor_numbers: Vec<String> =
                         jobs.iter().map(|j| j.contributor_number.clone()).collect();
 
-                    // Claim all jobs in the block at once (mark as 'p')
                     info!(
                         "Step 1: Claiming all {} jobs in block {} (marking as 'p')...",
                         contributor_numbers.len(),
@@ -536,7 +490,6 @@ async fn main() -> Result<()> {
                         contributor_numbers.len()
                     );
 
-                    // Process each item in the block individually
                     info!("Step 2: Processing items individually...");
                     let results = crate::process_block(
                         &scraper,
@@ -554,7 +507,6 @@ async fn main() -> Result<()> {
                     total_success += block_success;
                     total_error += block_error;
 
-                    // Update batch progress
                     client_arc
                         .update_batch_progress(
                             &batch_id,
@@ -575,12 +527,10 @@ async fn main() -> Result<()> {
 
                     all_results.extend(results);
 
-                    // Break if we've processed enough
                     if total_processed >= limit {
                         break;
                     }
 
-                    // Add delay between blocks (8-12 seconds)
                     if block_idx < total_blocks - 1 && total_processed < limit {
                         let mut rng = rand::thread_rng();
                         let delay_secs = rng.gen_range(8..=12);
@@ -589,7 +539,6 @@ async fn main() -> Result<()> {
                     }
                 }
 
-                // Complete batch
                 if total_processed > 0 {
                     client_arc.complete_batch(&batch_id).await?;
                     info!("Batch {} completed", batch_id);
@@ -600,13 +549,11 @@ async fn main() -> Result<()> {
             info!("Total processed: {}", total_processed);
             info!("Success: {}, Errors: {}", total_success, total_error);
 
-            // Calculate and display performance report
             let duration = start_time.elapsed().as_secs_f64();
             let report =
                 PerformanceReport::new(total_processed, total_success, total_error, duration);
             report.display();
 
-            // Shutdown scraper
             scraper.shutdown().await;
         }
 
