@@ -1,7 +1,10 @@
 use anyhow::Result;
 use rand::seq::SliceRandom;
 use rand::Rng;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use thirtyfour::{By, DesiredCapabilities, WebDriver, WebElement};
+use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 
 // Delay patterns for human-like behavior (more conservative timing)
@@ -71,6 +74,102 @@ struct IPTUData {
     cep: Option<String>,
 }
 
+// Failure tracker for cooldown management
+// Implements the following logic:
+// - Tracks failures within a 10-minute window
+// - If 2+ failures occur within 10 minutes, triggers a 20-minute cooldown
+// - Continues applying 20-minute cooldowns on subsequent failures
+// - Resets all counters upon first success
+#[derive(Debug, Clone)]
+struct FailureTracker {
+    failure_count: usize,
+    failure_timestamps: Vec<u64>, // Unix timestamps in seconds
+    last_cooldown: Option<u64>,   // Timestamp of last cooldown
+    cooldown_active: bool,
+}
+
+impl FailureTracker {
+    fn new() -> Self {
+        Self {
+            failure_count: 0,
+            failure_timestamps: Vec::new(),
+            last_cooldown: None,
+            cooldown_active: false,
+        }
+    }
+
+    fn get_current_timestamp() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    // Check if we need to cooldown (2 failures within 10 minutes)
+    fn should_cooldown(&mut self) -> bool {
+        let now = Self::get_current_timestamp();
+
+        // Clean old timestamps (older than 10 minutes)
+        self.failure_timestamps.retain(|&ts| now - ts < 600);
+
+        // Check if we have 2+ failures in the last 10 minutes
+        self.failure_timestamps.len() >= 2
+    }
+
+    // Record a failure
+    fn record_failure(&mut self) {
+        let now = Self::get_current_timestamp();
+        self.failure_timestamps.push(now);
+        self.failure_count += 1;
+
+        tracing::warn!(
+            "📊 Failure recorded. Total failures: {}, Recent failures (10 min): {}",
+            self.failure_count,
+            self.failure_timestamps.len()
+        );
+    }
+
+    // Record a success - reset counters
+    fn record_success(&mut self) {
+        if self.failure_count > 0 {
+            tracing::info!("✅ Success after {} failures - resetting counters", self.failure_count);
+        }
+        self.failure_count = 0;
+        self.failure_timestamps.clear();
+        self.cooldown_active = false;
+        self.last_cooldown = None;
+    }
+
+    // Apply cooldown if needed
+    async fn apply_cooldown_if_needed(&mut self) {
+        if self.should_cooldown() {
+            self.cooldown_active = true;
+            let cooldown_duration = 1200; // 20 minutes in seconds
+
+            tracing::error!("🚫 2 failures detected within 10 minutes!");
+            tracing::warn!("⏸️  Initiating 20-minute cooldown period to avoid rate limiting...");
+            tracing::info!("💤 Sleeping for {} seconds", cooldown_duration);
+
+            self.last_cooldown = Some(Self::get_current_timestamp());
+
+            // Show progress every 2 minutes
+            for i in 0..10 {
+                sleep(Duration::from_secs(120)).await;
+                let remaining = (10 - i - 1) * 2;
+                if remaining > 0 {
+                    tracing::info!("⏳ Cooldown in progress: {} minutes remaining", remaining);
+                }
+            }
+
+            tracing::info!("✅ Cooldown period complete - resuming operations");
+
+            // Clear failure timestamps after cooldown
+            self.failure_timestamps.clear();
+            self.cooldown_active = false;
+        }
+    }
+}
+
 pub struct ScraperConfig {
     pub max_concurrent: usize,
     pub headless: bool,
@@ -93,6 +192,7 @@ impl ScraperConfig {
 pub struct ScraperEngine {
     config: ScraperConfig,
     driver_pool: Vec<WebDriver>,
+    failure_tracker: Arc<Mutex<FailureTracker>>,
 }
 
 // Helper functions for human-like behavior
@@ -196,6 +296,7 @@ impl ScraperEngine {
         Ok(Self {
             config,
             driver_pool,
+            failure_tracker: Arc::new(Mutex::new(FailureTracker::new())),
         })
     }
 
@@ -227,6 +328,12 @@ impl ScraperEngine {
         use futures::future::join_all;
 
         for chunk in jobs.chunks(self.config.max_concurrent) {
+            // Check if we need to apply cooldown before processing this chunk
+            {
+                let mut tracker = self.failure_tracker.lock().await;
+                tracker.apply_cooldown_if_needed().await;
+            }
+
             let mut tasks = Vec::new();
 
             // Launch all jobs in this chunk concurrently
@@ -303,6 +410,17 @@ impl ScraperEngine {
             for (number, scraper_result) in chunk_results {
                 completed += 1;
                 tracing::info!("Completed job {}/{}: {}", completed, total, number);
+
+                // Track failures and successes
+                let mut tracker = self.failure_tracker.lock().await;
+                if scraper_result.success {
+                    tracker.record_success();
+                } else {
+                    tracker.record_failure();
+                    // Apply cooldown if we have 2 failures within 10 minutes
+                    tracker.apply_cooldown_if_needed().await;
+                }
+                drop(tracker); // Explicitly drop the lock
 
                 // Call the callback with the result
                 callback(&scraper_result, completed, total);
@@ -546,8 +664,8 @@ impl ScraperEngine {
         if !has_iptu && !has_proprietario {
             // Page failed to load properly - trigger cooldown
             tracing::error!("Critical elements not found - page failed to load properly");
-            tracing::warn!("⏸️  Pausing for 90 seconds to avoid rate limiting...");
-            sleep(Duration::from_secs(90)).await;
+            tracing::warn!("⏸️  Pausing for 120 seconds to avoid rate limiting...");
+            sleep(Duration::from_secs(120)).await;
             anyhow::bail!("Page did not load results correctly - server may be rate limiting");
         }
 
