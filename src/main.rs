@@ -201,45 +201,75 @@ async fn process_block(
                 processed_by: Some("cli".to_string()),
             };
 
-            if let Err(e) = client.upload_results(vec![iptu_result]).await {
-                tracing::error!(
-                    "  Item {}/{}: Failed to upload result: {}",
-                    item_num,
-                    total_items,
-                    e
-                );
-            } else {
-                info!(
-                    "  Item {}/{}: Uploaded result to database",
-                    item_num, total_items
-                );
-            }
+            // Só salvar na tabela iptus se foi bem-sucedido
+            if result.success {
+                // Verificar se já existe um registro com este contributor_number
+                let already_exists = match client.check_existing_iptu(&result.contributor_number).await {
+                    Ok(exists) => exists,
+                    Err(e) => {
+                        tracing::error!(
+                            "  Item {}/{}: Failed to check existing IPTU: {}",
+                            item_num,
+                            total_items,
+                            e
+                        );
+                        false // Em caso de erro, tentamos salvar mesmo assim
+                    }
+                };
 
-            if result.success && result.nome_proprietario.is_some() {
-                info!(
-                    "  Item {}/{}: Updating status from 'p' to 's' (success)",
-                    item_num, total_items
-                );
-                if let Err(e) = client
-                    .mark_iptu_list_as_success(
-                        vec![result.contributor_number.clone()],
-                        from_priority_table,
-                    )
-                    .await
-                {
-                    tracing::error!(
-                        "  Item {}/{}: Failed to mark as success: {}",
-                        item_num,
-                        total_items,
-                        e
-                    );
+                if !already_exists {
+                    if let Err(e) = client.upload_results(vec![iptu_result]).await {
+                        tracing::error!(
+                            "  Item {}/{}: Failed to upload result: {}",
+                            item_num,
+                            total_items,
+                            e
+                        );
+                    } else {
+                        info!(
+                            "  Item {}/{}: ✓ Uploaded new result to database",
+                            item_num, total_items
+                        );
+                    }
                 } else {
                     info!(
-                        "  Item {}/{}: ✓ Status updated to 's'",
-                        item_num, total_items
+                        "  Item {}/{}: ⏭️  Skipped upload - contributor_number {} already exists in iptus table",
+                        item_num, total_items, result.contributor_number
                     );
                 }
+
+                // Marcar como sucesso na lista de controle
+                if result.nome_proprietario.is_some() {
+                    info!(
+                        "  Item {}/{}: Updating status from 'p' to 's' (success)",
+                        item_num, total_items
+                    );
+                    if let Err(e) = client
+                        .mark_iptu_list_as_success(
+                            vec![result.contributor_number.clone()],
+                            from_priority_table,
+                        )
+                        .await
+                    {
+                        tracing::error!(
+                            "  Item {}/{}: Failed to mark as success: {}",
+                            item_num,
+                            total_items,
+                            e
+                        );
+                    } else {
+                        info!(
+                            "  Item {}/{}: ✓ Status updated to 's'",
+                            item_num, total_items
+                        );
+                    }
+                }
             } else {
+                // Falha no scraping - NÃO salvar na tabela iptus, apenas marcar como erro
+                info!(
+                    "  Item {}/{}: ❌ Scraping failed - NOT saving to iptus table",
+                    item_num, total_items
+                );
                 info!(
                     "  Item {}/{}: Updating status from 'p' to 'e' (error)",
                     item_num, total_items

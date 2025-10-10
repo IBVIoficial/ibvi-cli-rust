@@ -318,6 +318,33 @@ impl SupabaseClient {
         Ok(())
     }
 
+    pub async fn check_existing_iptu(&self, contributor_number: &str) -> Result<bool> {
+        let url = format!("{}/rest/v1/iptus", self.base_url);
+        let auth_key = self.service_role_key.as_ref().unwrap_or(&self.api_key);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("apikey", auth_key)
+            .header("Authorization", format!("Bearer {}", auth_key))
+            .query(&[
+                ("contributor_number", format!("eq.{}", contributor_number).as_str()),
+                ("select", "contributor_number"),
+                ("limit", "1"),
+            ])
+            .send()
+            .await?;
+
+        if response.status().is_success() {
+            let text = response.text().await?;
+            let results: Vec<serde_json::Value> = serde_json::from_str(&text)?;
+            Ok(!results.is_empty())
+        } else {
+            // Em caso de erro na consulta, assumimos que não existe
+            Ok(false)
+        }
+    }
+
     pub async fn mark_iptu_list_as_success(
         &self,
         contributor_numbers: Vec<String>,
