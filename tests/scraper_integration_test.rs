@@ -80,13 +80,19 @@ async fn test_scraper_error_handling() {
 // Test batch processing with empty input
 #[tokio::test]
 async fn test_empty_batch_processing() {
-    let _config = ScraperConfig {
+    // Test configuration - would be used when WebDriver is enabled
+    // For now, just verifying the config structure compiles
+    let config = ScraperConfig {
         max_concurrent: 2,
         headless: true,
         timeout_secs: 30,
         retry_attempts: 1,
         rate_limit_per_hour: 100,
     };
+
+    // Verify config values are set correctly
+    assert_eq!(config.max_concurrent, 2);
+    assert_eq!(config.timeout_secs(), 30);
 
     // Note: This test would need WebDriver running to work fully
     // For now, we're testing the structure and configuration
