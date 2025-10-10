@@ -310,10 +310,10 @@ impl ScraperEngine {
                 results.push(scraper_result);
             }
 
-            // Add longer delay between chunks to avoid overwhelming the server
+            // Add delay between chunks (8-12 seconds as requested)
             if chunk.len() == self.config.max_concurrent && completed < total {
                 let mut rng = rand::thread_rng();
-                let chunk_delay = rng.gen_range(8000..=15000); // Increased from 3-5s to 8-15s
+                let chunk_delay = rng.gen_range(8000..=12000); // 8-12 seconds between chunks
                 tracing::info!("Waiting {}ms before processing next chunk", chunk_delay);
                 sleep(Duration::from_millis(chunk_delay)).await;
             }

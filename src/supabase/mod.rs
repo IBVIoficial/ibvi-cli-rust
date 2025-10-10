@@ -172,19 +172,32 @@ impl SupabaseClient {
             "status": "p",  // p for processing
         });
 
-        tracing::info!("Claiming {} jobs from {}", job_ids.len(), table_name);
+        tracing::info!("Claiming {} jobs from {} (marking all as 'p' in a single request)", job_ids.len(), table_name);
 
-        for id in job_ids {
-            self.client
-                .patch(&url)
-                .header("apikey", auth_key)
-                .header("Authorization", format!("Bearer {}", auth_key))
-                .header("Content-Type", "application/json")
-                .query(&[("contributor_number", format!("eq.{}", id))])
-                .json(&update_data)
-                .send()
-                .await?;
+        // Build the IN clause for all contributor numbers
+        let in_clause = job_ids
+            .iter()
+            .map(|id| format!("\"{}\"", id))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        // Update all jobs at once using the IN operator
+        let response = self.client
+            .patch(&url)
+            .header("apikey", auth_key)
+            .header("Authorization", format!("Bearer {}", auth_key))
+            .header("Content-Type", "application/json")
+            .query(&[("contributor_number", format!("in.({})", in_clause))])
+            .json(&update_data)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await?;
+            anyhow::bail!("Failed to claim jobs: {}", error_text);
         }
+
+        tracing::info!("Successfully claimed {} jobs (all marked as 'p')", job_ids.len());
 
         Ok(())
     }
