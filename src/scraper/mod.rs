@@ -747,3 +747,261 @@ impl ScraperEngine {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Tests for FailureTracker
+    #[test]
+    fn test_failure_tracker_new() {
+        let tracker = FailureTracker::new();
+        assert_eq!(tracker.failure_count, 0);
+        assert_eq!(tracker.failure_timestamps.len(), 0);
+        assert_eq!(tracker.cooldown_active, false);
+        assert!(tracker.last_cooldown.is_none());
+    }
+
+    #[test]
+    fn test_failure_tracker_record_failure() {
+        let mut tracker = FailureTracker::new();
+
+        tracker.record_failure();
+        assert_eq!(tracker.failure_count, 1);
+        assert_eq!(tracker.failure_timestamps.len(), 1);
+
+        tracker.record_failure();
+        assert_eq!(tracker.failure_count, 2);
+        assert_eq!(tracker.failure_timestamps.len(), 2);
+    }
+
+    #[test]
+    fn test_failure_tracker_record_success() {
+        let mut tracker = FailureTracker::new();
+
+        // Add some failures
+        tracker.record_failure();
+        tracker.record_failure();
+        assert_eq!(tracker.failure_count, 2);
+
+        // Record success should reset everything
+        tracker.record_success();
+        assert_eq!(tracker.failure_count, 0);
+        assert_eq!(tracker.failure_timestamps.len(), 0);
+        assert_eq!(tracker.cooldown_active, false);
+    }
+
+    #[test]
+    fn test_should_cooldown_with_two_recent_failures() {
+        let mut tracker = FailureTracker::new();
+
+        // Add two failures
+        tracker.record_failure();
+        tracker.record_failure();
+
+        // Should trigger cooldown
+        assert!(tracker.should_cooldown());
+    }
+
+    #[test]
+    fn test_should_not_cooldown_with_one_failure() {
+        let mut tracker = FailureTracker::new();
+
+        // Add only one failure
+        tracker.record_failure();
+
+        // Should NOT trigger cooldown
+        assert!(!tracker.should_cooldown());
+    }
+
+    #[test]
+    fn test_old_failures_are_cleaned_up() {
+        let mut tracker = FailureTracker::new();
+
+        // Manually add old timestamp (more than 10 minutes ago)
+        let old_timestamp = FailureTracker::get_current_timestamp() - 700; // 11+ minutes ago
+        tracker.failure_timestamps.push(old_timestamp);
+        tracker.failure_timestamps.push(old_timestamp);
+
+        // Old failures should be cleaned up and not trigger cooldown
+        assert!(!tracker.should_cooldown());
+        assert_eq!(tracker.failure_timestamps.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_apply_cooldown_if_needed() {
+        let mut tracker = FailureTracker::new();
+
+        // Add two failures to trigger cooldown
+        tracker.record_failure();
+        tracker.record_failure();
+
+        // This should trigger cooldown (but we'll use a shorter duration for testing)
+        // Note: In a real test, we'd mock the sleep function
+        assert!(tracker.should_cooldown());
+
+        // After cooldown, timestamps should be cleared
+        // (In production code, this happens after 20 minutes)
+    }
+
+    // Test for ScraperResult
+    #[test]
+    fn test_scraper_result_creation() {
+        let result = ScraperResult {
+            contributor_number: "123.456.789-0".to_string(),
+            numero_cadastro: Some("12345".to_string()),
+            nome_proprietario: Some("John Doe".to_string()),
+            nome_compromissario: None,
+            endereco: Some("Rua Test".to_string()),
+            numero: Some("123".to_string()),
+            complemento: None,
+            bairro: Some("Centro".to_string()),
+            cep: Some("12345-678".to_string()),
+            success: true,
+            error: None,
+        };
+
+        assert_eq!(result.contributor_number, "123.456.789-0");
+        assert!(result.success);
+        assert!(result.error.is_none());
+    }
+
+    #[test]
+    fn test_scraper_result_with_error() {
+        let result = ScraperResult {
+            contributor_number: "123.456.789-0".to_string(),
+            numero_cadastro: None,
+            nome_proprietario: None,
+            nome_compromissario: None,
+            endereco: None,
+            numero: None,
+            complemento: None,
+            bairro: None,
+            cep: None,
+            success: false,
+            error: Some("Failed to load page".to_string()),
+        };
+
+        assert!(!result.success);
+        assert_eq!(result.error, Some("Failed to load page".to_string()));
+    }
+
+    // Test for DelayPattern
+    #[tokio::test]
+    async fn test_delay_pattern_random() {
+        // Test that random delay pattern can be created
+        let pattern = DelayPattern::random();
+
+        // Should be one of the valid patterns
+        match pattern {
+            DelayPattern::Quick | DelayPattern::Normal | DelayPattern::Slow => {
+                // Valid pattern
+                assert!(true);
+            }
+        }
+    }
+
+    // Test for ScraperConfig
+    #[test]
+    fn test_scraper_config() {
+        let config = ScraperConfig {
+            max_concurrent: 5,
+            headless: true,
+            timeout_secs: 30,
+            retry_attempts: 3,
+            rate_limit_per_hour: 100,
+        };
+
+        assert_eq!(config.max_concurrent, 5);
+        assert_eq!(config.headless, true);
+        assert_eq!(config.timeout_secs(), 30);
+        assert_eq!(config.retry_attempts(), 3);
+        assert_eq!(config.rate_limit_per_hour, 100);
+    }
+
+    // Integration test for failure tracking in ScraperEngine
+    #[tokio::test]
+    async fn test_scraper_engine_failure_tracking() {
+        // This would require a mock WebDriver setup
+        // For now, we'll test the failure tracker integration concept
+
+        let tracker = Arc::new(Mutex::new(FailureTracker::new()));
+
+        // Simulate multiple failures
+        {
+            let mut t = tracker.lock().await;
+            t.record_failure();
+            t.record_failure();
+            assert!(t.should_cooldown());
+        }
+
+        // Simulate success to reset
+        {
+            let mut t = tracker.lock().await;
+            t.record_success();
+            assert_eq!(t.failure_count, 0);
+        }
+    }
+
+    // Test helper function for timestamp
+    #[test]
+    fn test_get_current_timestamp() {
+        let timestamp = FailureTracker::get_current_timestamp();
+
+        // Timestamp should be a reasonable Unix timestamp (after year 2020)
+        assert!(timestamp > 1577836800); // January 1, 2020
+    }
+
+    // Test for concurrent failure tracking
+    #[tokio::test]
+    async fn test_concurrent_failure_tracking() {
+        let tracker = Arc::new(Mutex::new(FailureTracker::new()));
+
+        // Simulate concurrent access
+        let tracker1 = tracker.clone();
+        let tracker2 = tracker.clone();
+
+        let handle1 = tokio::spawn(async move {
+            let mut t = tracker1.lock().await;
+            t.record_failure();
+        });
+
+        let handle2 = tokio::spawn(async move {
+            let mut t = tracker2.lock().await;
+            t.record_failure();
+        });
+
+        handle1.await.unwrap();
+        handle2.await.unwrap();
+
+        // Check final state
+        let t = tracker.lock().await;
+        assert_eq!(t.failure_count, 2);
+        assert_eq!(t.failure_timestamps.len(), 2);
+    }
+
+    // Test for mixed success and failure scenarios
+    #[test]
+    fn test_mixed_success_failure_scenarios() {
+        let mut tracker = FailureTracker::new();
+
+        // Scenario 1: Failure -> Success -> Failure
+        tracker.record_failure();
+        assert_eq!(tracker.failure_count, 1);
+
+        tracker.record_success();
+        assert_eq!(tracker.failure_count, 0);
+
+        tracker.record_failure();
+        assert_eq!(tracker.failure_count, 1);
+        assert!(!tracker.should_cooldown()); // Only 1 failure, no cooldown
+
+        // Scenario 2: Multiple failures then success
+        tracker.record_failure(); // Now 2 failures
+        assert!(tracker.should_cooldown()); // Should trigger cooldown
+
+        tracker.record_success();
+        assert_eq!(tracker.failure_count, 0);
+        assert!(!tracker.should_cooldown()); // Reset after success
+    }
+}

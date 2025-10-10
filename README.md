@@ -9,6 +9,10 @@ A command-line interface for extracting IPTU (São Paulo property tax) data from
 - Upload results to Supabase
 - Track batch progress
 - Rate limiting and concurrent processing
+- **Automatic failure recovery with cooldown system**
+  - Tracks failures within 10-minute windows
+  - Applies 20-minute cooldown after 2 failures
+  - Automatically resets counters on success
 
 ## Prerequisites
 
@@ -84,6 +88,59 @@ Set the `RUST_LOG` environment variable to control logging level:
 RUST_LOG=debug cargo run -- process
 ```
 
+## Testing
+
+The project includes comprehensive unit and integration tests.
+
+### Running Tests
+
+```bash
+# Run all tests
+cargo test
+
+# Run with output for debugging
+cargo test -- --nocapture
+
+# Run specific test module
+cargo test scraper::tests
+
+# Run integration tests only
+cargo test --test scraper_integration_test
+
+# Run a specific test
+cargo test test_failure_tracker_new
+
+# Run tests with single thread (useful for debugging)
+cargo test -- --test-threads=1
+```
+
+### Test Coverage
+
+The test suite covers:
+
+- **FailureTracker**: Cooldown system and failure management
+  - Creation and initialization
+  - Failure/success recording
+  - Cooldown detection (2 failures in 10 minutes)
+  - Timestamp cleanup for old failures
+  - Concurrent access handling
+
+- **ScraperEngine**: Core scraping functionality
+  - Configuration management
+  - Result creation and validation
+  - Error handling
+
+- **Integration Tests**: End-to-end scenarios
+  - Contributor number format validation
+  - Batch processing
+  - Concurrent operations
+  - Failure scenarios and recovery
+
+### Test Files
+
+- `src/scraper/mod.rs`: Unit tests within the module (15 tests)
+- `tests/scraper_integration_test.rs`: Integration tests (9 tests)
+
 ## Database Schema
 
 The CLI expects the following Supabase tables:
@@ -91,3 +148,15 @@ The CLI expects the following Supabase tables:
 - `iptus_list`: Queue of contributor numbers to process
 - `iptus`: Results table
 - `batches`: Batch tracking table
+
+## Failure Recovery System
+
+The scraper includes an intelligent failure recovery mechanism:
+
+1. **Failure Detection**: Monitors all scraping attempts
+2. **10-Minute Window**: Tracks failures within rolling 10-minute windows
+3. **Automatic Cooldown**: After 2 failures in 10 minutes, enters 20-minute cooldown
+4. **Progress Tracking**: Shows cooldown progress every 2 minutes
+5. **Auto-Reset**: Success automatically resets all failure counters
+
+This prevents aggressive scraping that could lead to IP bans while maintaining efficient processing.
