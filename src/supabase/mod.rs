@@ -73,7 +73,7 @@ impl SupabaseClient {
             .query(&[
                 ("select", "contributor_number,status"),
                 ("status", "is.null"),
-                ("order", "contributor_number.asc"),
+                ("order", "contributor_number.desc"),
                 ("limit", &limit.to_string()),
             ])
             .send()
@@ -123,7 +123,7 @@ impl SupabaseClient {
             .query(&[
                 ("select", "contributor_number,status"),
                 ("status", "is.null"),
-                ("order", "contributor_number.asc"),
+                ("order", "contributor_number.desc"),
                 ("limit", &limit.to_string()),
             ])
             .send()
