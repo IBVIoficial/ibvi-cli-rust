@@ -348,7 +348,7 @@ async fn main() -> Result<()> {
             }
             info!("ChromeDriver script executed. Check logs for status.");
 
-            const BLOCK_SIZE: usize = 5;
+            const BLOCK_SIZE: usize = 12;
 
             let config = ScraperConfig {
                 max_concurrent: concurrent,

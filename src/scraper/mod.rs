@@ -346,8 +346,8 @@ impl ScraperEngine {
                 let base_delay = match i {
                     0 => 0,
                     _ => {
-                        let min = 6000 + (i as u64 * 2000);
-                        let max = 12000 + (i as u64 * 3000);
+                        let min = 2000 + (i as u64 * 2000);
+                        let max = 5000 + (i as u64 * 2000);
                         rng.gen_range(min..=max)
                     }
                 };
