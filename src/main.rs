@@ -147,157 +147,153 @@ async fn process_block(
     batch_id: Option<String>,
     from_priority_table: bool,
 ) -> Result<Vec<scraper::ScraperResult>> {
-    let mut results = Vec::new();
     let total_items = contributor_numbers.len();
 
     info!(
-        "Processing {} items individually (already marked as 'p')",
+        "Processing {} items concurrently in this block",
         total_items
     );
 
-    for (idx, contributor_number) in contributor_numbers.iter().enumerate() {
-        let item_num = idx + 1;
-        info!(
-            "  Item {}/{}: Starting processing for {}",
-            item_num, total_items, contributor_number
-        );
-
-        let job_results = scraper
-            .process_batch_with_callback(
-                vec![contributor_number.clone()],
-                move |result: &scraper::ScraperResult, _completed, _total| {
-                    if result.success {
-                        info!(
-                            "  Item {}/{}: ✓ Successfully scraped {}",
-                            item_num, total_items, result.contributor_number
-                        );
-                    } else {
-                        info!(
-                            "  Item {}/{}: ✗ Failed to scrape {}: {:?}",
-                            item_num, total_items, result.contributor_number, result.error
-                        );
-                    }
-                },
-            )
-            .await;
-
-        if let Some(result) = job_results.into_iter().next() {
-            let now = chrono::Utc::now().to_rfc3339();
-            let iptu_result = crate::supabase::IPTUResult {
-                id: Some(uuid::Uuid::new_v4().to_string()),
-                contributor_number: result.contributor_number.clone(),
-                numero_cadastro: result.numero_cadastro.clone(),
-                nome_proprietario: result.nome_proprietario.clone(),
-                nome_compromissario: result.nome_compromissario.clone(),
-                endereco: result.endereco.clone(),
-                numero: result.numero.clone(),
-                complemento: result.complemento.clone(),
-                bairro: result.bairro.clone(),
-                cep: result.cep.clone(),
-                sucesso: result.success,
-                erro: result.error.clone(),
-                batch_id: batch_id.clone(),
-                timestamp: now,
-                processed_by: Some("cli".to_string()),
-            };
-
-            // Só salvar na tabela iptus se foi bem-sucedido
-            if result.success {
-                // Verificar se já existe um registro com este contributor_number
-                let already_exists = match client.check_existing_iptu(&result.contributor_number).await {
-                    Ok(exists) => exists,
-                    Err(e) => {
-                        tracing::error!(
-                            "  Item {}/{}: Failed to check existing IPTU: {}",
-                            item_num,
-                            total_items,
-                            e
-                        );
-                        false // Em caso de erro, tentamos salvar mesmo assim
-                    }
-                };
-
-                if !already_exists {
-                    if let Err(e) = client.upload_results(vec![iptu_result]).await {
-                        tracing::error!(
-                            "  Item {}/{}: Failed to upload result: {}",
-                            item_num,
-                            total_items,
-                            e
-                        );
-                    } else {
-                        info!(
-                            "  Item {}/{}: ✓ Uploaded new result to database",
-                            item_num, total_items
-                        );
-                    }
+    // Process all items in the block concurrently using process_batch_with_callback
+    let job_results = scraper
+        .process_batch_with_callback(
+            contributor_numbers.clone(),
+            move |result: &scraper::ScraperResult, completed, total| {
+                if result.success {
+                    info!(
+                        "  [{}/{}] ✓ Successfully scraped {}",
+                        completed, total, result.contributor_number
+                    );
                 } else {
                     info!(
-                        "  Item {}/{}: ⏭️  Skipped upload - contributor_number {} already exists in iptus table",
-                        item_num, total_items, result.contributor_number
+                        "  [{}/{}] ✗ Failed to scrape {}: {:?}",
+                        completed, total, result.contributor_number, result.error
                     );
                 }
+            },
+        )
+        .await;
 
-                // Marcar como sucesso na lista de controle
-                if result.nome_proprietario.is_some() {
-                    info!(
-                        "  Item {}/{}: Updating status from 'p' to 's' (success)",
-                        item_num, total_items
-                    );
-                    if let Err(e) = client
-                        .mark_iptu_list_as_success(
-                            vec![result.contributor_number.clone()],
-                            from_priority_table,
-                        )
-                        .await
-                    {
-                        tracing::error!(
-                            "  Item {}/{}: Failed to mark as success: {}",
-                            item_num,
-                            total_items,
-                            e
-                        );
-                    } else {
-                        info!(
-                            "  Item {}/{}: ✓ Status updated to 's'",
-                            item_num, total_items
-                        );
-                    }
-                }
-            } else {
-                // Falha no scraping - NÃO salvar na tabela iptus, apenas marcar como erro
-                info!(
-                    "  Item {}/{}: ❌ Scraping failed - NOT saving to iptus table",
-                    item_num, total_items
-                );
-                info!(
-                    "  Item {}/{}: Updating status from 'p' to 'e' (error)",
-                    item_num, total_items
-                );
-                if let Err(e) = client
-                    .mark_iptu_list_as_error(
-                        vec![result.contributor_number.clone()],
-                        from_priority_table,
-                    )
-                    .await
-                {
+    // Now handle database operations for all results
+    let mut results = Vec::new();
+    for (idx, result) in job_results.into_iter().enumerate() {
+        let item_num = idx + 1;
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let iptu_result = crate::supabase::IPTUResult {
+            id: Some(uuid::Uuid::new_v4().to_string()),
+            contributor_number: result.contributor_number.clone(),
+            numero_cadastro: result.numero_cadastro.clone(),
+            nome_proprietario: result.nome_proprietario.clone(),
+            nome_compromissario: result.nome_compromissario.clone(),
+            endereco: result.endereco.clone(),
+            numero: result.numero.clone(),
+            complemento: result.complemento.clone(),
+            bairro: result.bairro.clone(),
+            cep: result.cep.clone(),
+            sucesso: result.success,
+            erro: result.error.clone(),
+            batch_id: batch_id.clone(),
+            timestamp: now,
+            processed_by: Some("cli".to_string()),
+        };
+
+        // Só salvar na tabela iptus se foi bem-sucedido
+        if result.success {
+            // Verificar se já existe um registro com este contributor_number
+            let already_exists = match client.check_existing_iptu(&result.contributor_number).await {
+                Ok(exists) => exists,
+                Err(e) => {
                     tracing::error!(
-                        "  Item {}/{}: Failed to mark as error: {}",
+                        "  Item {}/{}: Failed to check existing IPTU: {}",
+                        item_num,
+                        total_items,
+                        e
+                    );
+                    false // Em caso de erro, tentamos salvar mesmo assim
+                }
+            };
+
+            if !already_exists {
+                if let Err(e) = client.upload_results(vec![iptu_result]).await {
+                    tracing::error!(
+                        "  Item {}/{}: Failed to upload result: {}",
                         item_num,
                         total_items,
                         e
                     );
                 } else {
                     info!(
-                        "  Item {}/{}: ✓ Status updated to 'e'",
+                        "  Item {}/{}: ✓ Uploaded new result to database",
+                        item_num, total_items
+                    );
+                }
+            } else {
+                info!(
+                    "  Item {}/{}: ⏭️  Skipped upload - contributor_number {} already exists in iptus table",
+                    item_num, total_items, result.contributor_number
+                );
+            }
+
+            // Marcar como sucesso na lista de controle
+            if result.nome_proprietario.is_some() {
+                info!(
+                    "  Item {}/{}: Updating status from 'p' to 's' (success)",
+                    item_num, total_items
+                );
+                if let Err(e) = client
+                    .mark_iptu_list_as_success(
+                        vec![result.contributor_number.clone()],
+                        from_priority_table,
+                    )
+                    .await
+                {
+                    tracing::error!(
+                        "  Item {}/{}: Failed to mark as success: {}",
+                        item_num,
+                        total_items,
+                        e
+                    );
+                } else {
+                    info!(
+                        "  Item {}/{}: ✓ Status updated to 's'",
                         item_num, total_items
                     );
                 }
             }
-
-            info!("  Item {}/{}: Complete", item_num, total_items);
-            results.push(result);
+        } else {
+            // Falha no scraping - NÃO salvar na tabela iptus, apenas marcar como erro
+            info!(
+                "  Item {}/{}: ❌ Scraping failed - NOT saving to iptus table",
+                item_num, total_items
+            );
+            info!(
+                "  Item {}/{}: Updating status from 'p' to 'e' (error)",
+                item_num, total_items
+            );
+            if let Err(e) = client
+                .mark_iptu_list_as_error(
+                    vec![result.contributor_number.clone()],
+                    from_priority_table,
+                )
+                .await
+            {
+                tracing::error!(
+                    "  Item {}/{}: Failed to mark as error: {}",
+                    item_num,
+                    total_items,
+                    e
+                );
+            } else {
+                info!(
+                    "  Item {}/{}: ✓ Status updated to 'e'",
+                    item_num, total_items
+                );
+            }
         }
+
+        info!("  Item {}/{}: Complete", item_num, total_items);
+        results.push(result);
     }
 
     info!(

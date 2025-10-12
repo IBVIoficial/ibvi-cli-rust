@@ -74,6 +74,7 @@ struct IPTUData {
 struct FailureTracker {
     failure_count: usize,
     failure_timestamps: Vec<u64>,
+    consecutive_failures: usize,
     last_cooldown: Option<u64>,
     cooldown_active: bool,
 }
@@ -83,6 +84,7 @@ impl FailureTracker {
         Self {
             failure_count: 0,
             failure_timestamps: Vec::new(),
+            consecutive_failures: 0,
             last_cooldown: None,
             cooldown_active: false,
         }
@@ -98,50 +100,66 @@ impl FailureTracker {
     fn should_cooldown(&mut self) -> bool {
         let now = Self::get_current_timestamp();
 
-        self.failure_timestamps.retain(|&ts| now - ts < 600);
+        // Clean up old failures (older than 5 minutes instead of 10)
+        self.failure_timestamps.retain(|&ts| now - ts < 300);
 
-        self.failure_timestamps.len() >= 2
+        // Only cooldown if we have 3+ failures in 5 minutes AND 2+ consecutive failures
+        self.failure_timestamps.len() >= 3 && self.consecutive_failures >= 2
     }
 
-    fn record_failure(&mut self) {
+    fn record_failure(&mut self, is_rate_limit: bool) {
         let now = Self::get_current_timestamp();
         self.failure_timestamps.push(now);
         self.failure_count += 1;
+        self.consecutive_failures += 1;
 
-        tracing::warn!(
-            "📊 Failure recorded. Total failures: {}, Recent failures (10 min): {}",
-            self.failure_count,
-            self.failure_timestamps.len()
-        );
+        if is_rate_limit {
+            tracing::warn!(
+                "📊 Rate limit failure recorded. Total: {}, Recent (5 min): {}, Consecutive: {}",
+                self.failure_count,
+                self.failure_timestamps.len(),
+                self.consecutive_failures
+            );
+        } else {
+            tracing::warn!(
+                "📊 Failure recorded. Total: {}, Recent (5 min): {}, Consecutive: {}",
+                self.failure_count,
+                self.failure_timestamps.len(),
+                self.consecutive_failures
+            );
+        }
     }
 
     fn record_success(&mut self) {
         if self.failure_count > 0 {
             tracing::info!(
-                "✅ Success after {} failures - resetting counters",
-                self.failure_count
+                "✅ Success after {} failures ({} consecutive) - resetting counters",
+                self.failure_count,
+                self.consecutive_failures
             );
         }
         self.failure_count = 0;
         self.failure_timestamps.clear();
+        self.consecutive_failures = 0;
         self.cooldown_active = false;
         self.last_cooldown = None;
     }
 
-    async fn apply_cooldown_if_needed(&mut self) {
+    async fn apply_cooldown_if_needed(&mut self) -> bool {
         if self.should_cooldown() {
             self.cooldown_active = true;
-            let cooldown_duration = 1800;
+            let cooldown_duration = 600; // Reduced from 1800 (30min) to 600 (10min)
 
-            tracing::error!("🚫 2 failures detected within 10 minutes!");
-            tracing::warn!("⏸️  Initiating 30-minute cooldown period to avoid rate limiting...");
+            tracing::error!("🚫 Multiple failures detected (3+ in 5 minutes with 2+ consecutive)!");
+            tracing::warn!("⏸️  Initiating 10-minute cooldown period to avoid rate limiting...");
             tracing::info!("💤 Sleeping for {} seconds", cooldown_duration);
 
             self.last_cooldown = Some(Self::get_current_timestamp());
 
-            for i in 0..10 {
+            // Sleep in 2-minute intervals for progress updates
+            for i in 0..5 {
                 sleep(Duration::from_secs(120)).await;
-                let remaining = (10 - i - 1) * 2;
+                let remaining = (5 - i - 1) * 2;
                 if remaining > 0 {
                     tracing::info!("⏳ Cooldown in progress: {} minutes remaining", remaining);
                 }
@@ -150,8 +168,19 @@ impl FailureTracker {
             tracing::info!("✅ Cooldown period complete - resuming operations");
 
             self.failure_timestamps.clear();
+            self.consecutive_failures = 0;
             self.cooldown_active = false;
+            return true;
         }
+        false
+    }
+
+    fn is_cooldown_needed(&mut self) -> bool {
+        let now = Self::get_current_timestamp();
+        self.failure_timestamps.retain(|&ts| now - ts < 300);
+
+        // Quick check without full cooldown
+        self.failure_timestamps.len() >= 3 && self.consecutive_failures >= 2
     }
 }
 
@@ -304,11 +333,6 @@ impl ScraperEngine {
         use futures::future::join_all;
 
         for chunk in jobs.chunks(self.config.max_concurrent) {
-            {
-                let mut tracker = self.failure_tracker.lock().await;
-                tracker.apply_cooldown_if_needed().await;
-            }
-
             let mut tasks = Vec::new();
 
             for (i, contributor_number) in chunk.iter().enumerate() {
@@ -382,14 +406,38 @@ impl ScraperEngine {
                 if scraper_result.success {
                     tracker.record_success();
                 } else {
-                    tracker.record_failure();
-                    tracker.apply_cooldown_if_needed().await;
+                    // Detect if this is a rate limit error
+                    let is_rate_limit = scraper_result
+                        .error
+                        .as_ref()
+                        .map(|e| {
+                            e.contains("rate limiting")
+                                || e.contains("did not load results correctly")
+                                || e.contains("Critical elements not found")
+                        })
+                        .unwrap_or(false);
+
+                    tracker.record_failure(is_rate_limit);
+
+                    // Only apply cooldown if it's needed, don't block unnecessarily
+                    if tracker.is_cooldown_needed() {
+                        tracing::warn!("⚠️  Cooldown may be triggered soon. Current failures: {} recent, {} consecutive",
+                            tracker.failure_timestamps.len(),
+                            tracker.consecutive_failures
+                        );
+                    }
                 }
                 drop(tracker);
 
                 callback(&scraper_result, completed, total);
 
                 results.push(scraper_result);
+            }
+
+            // Check if we need cooldown AFTER processing the chunk
+            {
+                let mut tracker = self.failure_tracker.lock().await;
+                tracker.apply_cooldown_if_needed().await;
             }
 
             if chunk.len() == self.config.max_concurrent && completed < total {
@@ -704,44 +752,49 @@ mod tests {
     fn test_failure_tracker_record_failure() {
         let mut tracker = FailureTracker::new();
 
-        tracker.record_failure();
+        tracker.record_failure(false);
         assert_eq!(tracker.failure_count, 1);
         assert_eq!(tracker.failure_timestamps.len(), 1);
+        assert_eq!(tracker.consecutive_failures, 1);
 
-        tracker.record_failure();
+        tracker.record_failure(false);
         assert_eq!(tracker.failure_count, 2);
         assert_eq!(tracker.failure_timestamps.len(), 2);
+        assert_eq!(tracker.consecutive_failures, 2);
     }
 
     #[test]
     fn test_failure_tracker_record_success() {
         let mut tracker = FailureTracker::new();
 
-        tracker.record_failure();
-        tracker.record_failure();
+        tracker.record_failure(false);
+        tracker.record_failure(false);
         assert_eq!(tracker.failure_count, 2);
 
         tracker.record_success();
         assert_eq!(tracker.failure_count, 0);
         assert_eq!(tracker.failure_timestamps.len(), 0);
+        assert_eq!(tracker.consecutive_failures, 0);
         assert_eq!(tracker.cooldown_active, false);
     }
 
     #[test]
-    fn test_should_cooldown_with_two_recent_failures() {
+    fn test_should_cooldown_with_three_recent_failures() {
         let mut tracker = FailureTracker::new();
 
-        tracker.record_failure();
-        tracker.record_failure();
+        tracker.record_failure(false);
+        tracker.record_failure(false);
+        tracker.record_failure(false);
 
         assert!(tracker.should_cooldown());
     }
 
     #[test]
-    fn test_should_not_cooldown_with_one_failure() {
+    fn test_should_not_cooldown_with_two_failures() {
         let mut tracker = FailureTracker::new();
 
-        tracker.record_failure();
+        tracker.record_failure(false);
+        tracker.record_failure(false);
 
         assert!(!tracker.should_cooldown());
     }
@@ -750,10 +803,13 @@ mod tests {
     fn test_old_failures_are_cleaned_up() {
         let mut tracker = FailureTracker::new();
 
-        let old_timestamp = FailureTracker::get_current_timestamp() - 700;
+        // Old timestamps (older than 5 minutes = 300 seconds)
+        let old_timestamp = FailureTracker::get_current_timestamp() - 400;
         tracker.failure_timestamps.push(old_timestamp);
         tracker.failure_timestamps.push(old_timestamp);
+        tracker.consecutive_failures = 2;
 
+        // Should not cooldown because timestamps are old
         assert!(!tracker.should_cooldown());
         assert_eq!(tracker.failure_timestamps.len(), 0);
     }
@@ -762,8 +818,9 @@ mod tests {
     async fn test_apply_cooldown_if_needed() {
         let mut tracker = FailureTracker::new();
 
-        tracker.record_failure();
-        tracker.record_failure();
+        tracker.record_failure(false);
+        tracker.record_failure(false);
+        tracker.record_failure(false);
 
         assert!(tracker.should_cooldown());
     }
@@ -844,8 +901,9 @@ mod tests {
 
         {
             let mut t = tracker.lock().await;
-            t.record_failure();
-            t.record_failure();
+            t.record_failure(false);
+            t.record_failure(false);
+            t.record_failure(false);
             assert!(t.should_cooldown());
         }
 
@@ -853,6 +911,7 @@ mod tests {
             let mut t = tracker.lock().await;
             t.record_success();
             assert_eq!(t.failure_count, 0);
+            assert_eq!(t.consecutive_failures, 0);
         }
     }
 
@@ -873,12 +932,12 @@ mod tests {
 
         let handle1 = tokio::spawn(async move {
             let mut t = tracker1.lock().await;
-            t.record_failure();
+            t.record_failure(false);
         });
 
         let handle2 = tokio::spawn(async move {
             let mut t = tracker2.lock().await;
-            t.record_failure();
+            t.record_failure(false);
         });
 
         handle1.await.unwrap();
@@ -887,27 +946,31 @@ mod tests {
         let t = tracker.lock().await;
         assert_eq!(t.failure_count, 2);
         assert_eq!(t.failure_timestamps.len(), 2);
+        assert_eq!(t.consecutive_failures, 2);
     }
 
     #[test]
     fn test_mixed_success_failure_scenarios() {
         let mut tracker = FailureTracker::new();
 
-        tracker.record_failure();
+        tracker.record_failure(false);
         assert_eq!(tracker.failure_count, 1);
 
         tracker.record_success();
         assert_eq!(tracker.failure_count, 0);
+        assert_eq!(tracker.consecutive_failures, 0);
 
-        tracker.record_failure();
+        tracker.record_failure(false);
         assert_eq!(tracker.failure_count, 1);
         assert!(!tracker.should_cooldown());
 
-        tracker.record_failure();
+        tracker.record_failure(false);
+        tracker.record_failure(false);
         assert!(tracker.should_cooldown());
 
         tracker.record_success();
         assert_eq!(tracker.failure_count, 0);
+        assert_eq!(tracker.consecutive_failures, 0);
         assert!(!tracker.should_cooldown());
     }
 }
