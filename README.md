@@ -70,6 +70,49 @@ Fetch results from Supabase:
 cargo run -- results --limit 10 --offset 0
 ```
 
+### Diretrix Enrichment Service
+
+The CLI now exposes a Rust microservice that enriches customer data using the
+Diretrix API. Configure the required environment variables and launch the
+service with the new `serve-enrichment` subcommand:
+
+```bash
+export DIRETRIX_BASE_URL=https://www.diretrixconsultoria.com.br/api
+export DIRETRIX_USER=your-user
+export DIRETRIX_PASS=your-pass
+
+cargo run -- serve-enrichment --addr 127.0.0.1:8080
+```
+
+When running, send POST requests to `/enrich/person` with parallel arrays of
+search types and values:
+
+```bash
+curl -X POST http://127.0.0.1:8080/enrich/person \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "search_types": ["cpf", "name", "email"],
+        "searches": ["12345678901", "Maria Joaquina", "maria@example.com"]
+      }'
+```
+
+The service tries the CPF first, then falls back to email, phone, and finally
+name. When multiple candidates are returned the best match is selected via a
+cosine similarity score (> 0.5). Successful responses are returned as a
+`GetCustomerData` payload. Failures return 404 when no match is found or 502 for
+Diretrix/API issues.
+
+Whenever you run the `diretrix` scraping command, the CLI automatically feeds
+each scraped property into the enrichment pipeline using the `Document 1`
+field (when it resembles a CPF) and the owner name as a secondary search.
+
+### React helper screen
+
+For quick manual tests a lightweight React component is available at
+`frontend/EnrichmentScreen.tsx`. Drop the component into your app, fill any of
+the optional fields (CPF, Name, Email, Phone) and submit; it will call the
+`/enrich/person` endpoint and render the normalised result or error messages.
+
 ## Environment Variables
 
 Create a `.env` file with:
@@ -160,3 +203,9 @@ The scraper includes an intelligent failure recovery mechanism:
 5. **Auto-Reset**: Success automatically resets all failure counters
 
 This prevents aggressive scraping that could lead to IP bans while maintaining efficient processing.
+
+### Diretrix
+        
+```bash
+cargo run -- diretrix --street "nome da rua sem o rua" --street-number "123"  
+```

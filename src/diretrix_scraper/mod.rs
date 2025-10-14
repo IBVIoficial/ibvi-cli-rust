@@ -156,7 +156,7 @@ impl DiretrixScraper {
         // Don't navigate directly to avoid 404 errors
         // The ensure_on_search_page method will handle navigation via menu/breadcrumb
         info!("Ready to navigate to search page via menu");
-        
+
         Ok(())
     }
 
@@ -218,7 +218,7 @@ impl DiretrixScraper {
             // Navigate to base URL first to ensure we're on the dashboard
             self.driver.goto(&self.base_url).await?;
             Self::wait_for_page_ready(&self.driver).await?;
-            
+
             // Extended initial wait for dashboard to fully load
             sleep(Duration::from_secs(5)).await;
 
@@ -236,7 +236,7 @@ impl DiretrixScraper {
             if click_if_present(&self.driver, breadcrumb_iptrix.clone()).await {
                 debug!("Clicked IP-Trix in breadcrumb");
                 sleep(Duration::from_millis(800)).await;
-                
+
                 // Then click Por Endereço
                 if click_if_present(&self.driver, breadcrumb_endereco.clone()).await {
                     debug!("Clicked Por Endereço in breadcrumb");
@@ -249,7 +249,7 @@ impl DiretrixScraper {
                 if click_if_present(&self.driver, By::LinkText("IP-Trix")).await {
                     debug!("Clicked IP-Trix menu link");
                     sleep(Duration::from_millis(800)).await;
-                    
+
                     if click_if_present(&self.driver, By::LinkText("Por Endereço")).await {
                         debug!("Clicked Por Endereço submenu");
                         navigated = true;
@@ -275,7 +275,7 @@ impl DiretrixScraper {
                 {
                     debug!("Clicked IP-TRIX span element");
                     sleep(Duration::from_millis(800)).await;
-                    
+
                     if click_if_present(&self.driver, By::LinkText("Por Endereço")).await {
                         debug!("Clicked Por Endereço after span click");
                         navigated = true;
@@ -293,7 +293,7 @@ impl DiretrixScraper {
                     debug!("Found consultas/iptrix menu link");
                     let _ = menu.click().await;
                     sleep(Duration::from_secs(1)).await;
-                    
+
                     if let Ok(link) = self.driver.find(By::LinkText("Por Endereço")).await {
                         link.click().await.ok();
                         debug!("Clicked Por Endereço from consultas menu");
@@ -313,19 +313,19 @@ impl DiretrixScraper {
             // Check for 404 error in page source
             let page_source = self.driver.source().await.unwrap_or_default();
             let lower_source = page_source.to_lowercase();
-            
+
             if lower_source.contains("http error 404")
                 || lower_source.contains("404.0 - not found")
                 || lower_source.contains("404 not found")
                 || lower_source.contains("página não encontrada")
             {
                 warn!("Detected 404 error page, backing out and retrying");
-                
+
                 // Navigate back to recover from 404
                 let _ = self.driver.back().await;
                 sleep(Duration::from_secs(3)).await;
                 self.driver.enter_default_frame().await?;
-                
+
                 // Continue to next attempt
                 continue;
             }
@@ -333,13 +333,13 @@ impl DiretrixScraper {
             // Check if we successfully reached the search page
             if let Ok(frame) = self.driver.find(By::Id("iframeConteudo")).await {
                 frame.enter_frame().await?;
-                
+
                 // Look for the search input field
                 if self.driver.find(By::Id("txtProcurar")).await.is_ok() {
                     info!("Successfully reached 'Por Endereço' search page (iframe)");
                     return Ok(());
                 }
-                
+
                 self.driver.enter_default_frame().await?;
             } else if self.driver.find(By::Id("txtProcurar")).await.is_ok() {
                 info!("Successfully reached 'Por Endereço' search page (main frame)");
@@ -472,9 +472,12 @@ impl DiretrixScraper {
                 }
                 Err(_) => {
                     if attempt < 5 {
-                        debug!("Attempt {}: Street field not found yet, waiting...", attempt);
+                        debug!(
+                            "Attempt {}: Street field not found yet, waiting...",
+                            attempt
+                        );
                         sleep(Duration::from_secs(1)).await;
-                        
+
                         // Try clicking the wrapper again
                         if let Ok(wrapper) = self.driver.find(By::Id("porEndereco")).await {
                             let _ = wrapper.click().await;
@@ -492,7 +495,7 @@ impl DiretrixScraper {
         debug!("Clicking and focusing street name input field");
         street_name_field.click().await?;
         sleep(Duration::from_millis(500)).await;
-        
+
         // Now fill the street name with human-like interaction
         ensure_input_value(&self.driver, &street_name_field, "txtProcurar", street_name).await?;
         info!("Filled street name: {}", street_name);
@@ -515,7 +518,7 @@ impl DiretrixScraper {
 
         // Step 6: Find and click search button with a brief pause
         sleep(Duration::from_millis(500)).await;
-        
+
         let search_button = self
             .driver
             .find(By::Id("btnPesquisar"))
@@ -645,14 +648,14 @@ mod tests {
     #[tokio::test]
     #[ignore] // Requires valid credentials and WebDriver
     async fn test_login() {
-        let scraper = DiretrixScraper::new(
-            "100198".to_string(),
-            "Mb082025".to_string(),
-            "http://localhost:9515",
-            false,
-        )
-        .await
-        .expect("Failed to create scraper");
+        let username = std::env::var("DIRETRIX_USERNAME").expect("DIRETRIX_USERNAME must be set");
+        let password = std::env::var("DIRETRIX_PASSWORD").expect("DIRETRIX_PASSWORD must be set");
+        let webdriver_url = std::env::var("DIRETRIX_WEBDRIVER_URL")
+            .unwrap_or_else(|_| "http://localhost:9515".to_string());
+
+        let scraper = DiretrixScraper::new(username, password, &webdriver_url, false)
+            .await
+            .expect("Failed to create scraper");
 
         let result = scraper.login().await;
         assert!(result.is_ok());
@@ -663,14 +666,14 @@ mod tests {
     #[tokio::test]
     #[ignore] // Requires valid credentials, WebDriver and login
     async fn test_search_by_address() {
-        let scraper = DiretrixScraper::new(
-            "100198".to_string(),
-            "Mb082025".to_string(),
-            "http://localhost:9515",
-            false,
-        )
-        .await
-        .expect("Failed to create scraper");
+        let username = std::env::var("DIRETRIX_USERNAME").expect("DIRETRIX_USERNAME must be set");
+        let password = std::env::var("DIRETRIX_PASSWORD").expect("DIRETRIX_PASSWORD must be set");
+        let webdriver_url = std::env::var("DIRETRIX_WEBDRIVER_URL")
+            .unwrap_or_else(|_| "http://localhost:9515".to_string());
+
+        let scraper = DiretrixScraper::new(username, password, &webdriver_url, false)
+            .await
+            .expect("Failed to create scraper");
 
         scraper.login().await.expect("Login failed");
 
