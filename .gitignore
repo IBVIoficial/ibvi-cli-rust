@@ -26,4 +26,4 @@ Cargo.lock
 
 *.log
 .superREADME.md
-.claude
+.claude.DS_Store
