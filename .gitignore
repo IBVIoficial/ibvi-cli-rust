@@ -28,3 +28,4 @@ Cargo.lock
 .superREADME.md
 .claude.DS_Store
 src/.DS_Store
+*.csv
