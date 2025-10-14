@@ -173,15 +173,17 @@ async fn test_concurrent_operations() {
 // Test for validating contributor number format
 #[test]
 fn test_contributor_number_format() {
-    let valid_numbers = vec![
-        "123.456.789-01",
-        "000.000.000-00",
-        "999.999.999-99",
-    ];
+    let valid_numbers = vec!["123.456.789-01", "000.000.000-00", "999.999.999-99"];
 
     for number in valid_numbers {
         let clean = number.replace(".", "").replace("-", "");
-        assert_eq!(clean.len(), 11, "Valid number {} should have 11 digits after cleaning, got: {}", number, clean);
+        assert_eq!(
+            clean.len(),
+            11,
+            "Valid number {} should have 11 digits after cleaning, got: {}",
+            number,
+            clean
+        );
     }
 
     let invalid_numbers = vec![
