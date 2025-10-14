@@ -328,7 +328,10 @@ impl SupabaseClient {
             .header("apikey", auth_key)
             .header("Authorization", format!("Bearer {}", auth_key))
             .query(&[
-                ("contributor_number", format!("eq.{}", contributor_number).as_str()),
+                (
+                    "contributor_number",
+                    format!("eq.{}", contributor_number).as_str(),
+                ),
                 ("select", "contributor_number"),
                 ("limit", "1"),
             ])
