@@ -1,211 +1,320 @@
 # IPTU CLI
 
-A command-line interface for extracting IPTU (São Paulo property tax) data from the municipal website.
+A robust command-line tool for extracting and enriching São Paulo property tax (IPTU) data with integrated web scraping, data enrichment services, and intelligent failure recovery.
 
-## Features
+## Overview
 
-- Fetch pending jobs from Supabase
-- Process jobs with web scraping (using ChromeDriver)
-- Upload results to Supabase
-- Track batch progress
-- Rate limiting and concurrent processing
-- **Automatic failure recovery with cooldown system**
-  - Tracks failures within 10-minute windows
-  - Applies 20-minute cooldown after 2 failures
-  - Automatically resets counters on success
+IPTU CLI is a Rust-based automation tool that:
+- Scrapes property data from São Paulo's municipal tax website
+- Enriches property records with owner information via Diretrix API
+- Integrates with Workbuscas API for automatic property enrichment
+- Provides a microservice for real-time data enrichment
+- Manages processing queues through Supabase
+- Handles failures gracefully with smart cooldown mechanisms
+
+## Key Features
+
+### Core Functionality
+- **Automated Job Processing**: Fetch and process property records from Supabase queues
+- **Web Scraping**: Selenium-based scraping with ChromeDriver integration
+- **Batch Management**: Track processing progress across multiple batches
+- **Concurrent Processing**: Configurable parallel scraper instances
+- **Rate Limiting**: Built-in protection against API/website throttling
+
+### Intelligent Failure Recovery
+- Tracks failures within rolling 10-minute windows
+- Automatically applies 20-minute cooldown after 2 failures
+- Progress tracking with 2-minute status updates
+- Auto-reset on successful operations
+- Prevents IP bans while maintaining efficiency
+
+### Data Enrichment Services
+- **Diretrix Integration**: Search property owner information by CPF, name, email, or phone
+- **Workbuscas API**: Automatic property enrichment during scraping
+- **Enrichment Microservice**: REST API for real-time enrichment requests
+- **Smart Matching**: Cosine similarity scoring for accurate owner identification
 
 ## Prerequisites
 
-- Rust (latest stable)
-- ChromeDriver running on port 9515
-- Supabase account with the required tables
+- **Rust**: Latest stable version (2021 edition)
+- **ChromeDriver**: Running on port 9515 for web scraping
+- **Supabase**: Account with configured tables (see [Database Schema](#database-schema))
+- **Node.js** (optional): For the React enrichment UI component
 
 ## Installation
 
-1. Clone the repository
-2. Copy `.env.example` to `.env` and fill in your Supabase credentials
-3. Build the project:
+1. **Clone the repository**
+   ```bash
+   git clone <repository-url>
+   cd iptu-cli
+   ```
 
-```bash
-cargo build --release
-```
+2. **Configure environment variables**
+   ```bash
+   cp .env.example .env
+   # Edit .env with your credentials
+   ```
+
+3. **Build the project**
+   ```bash
+   cargo build --release
+   ```
+
+4. **Start ChromeDriver** (in a separate terminal)
+   ```bash
+   ./start.chromedriver.sh
+   # Or manually: chromedriver --port=9515
+   ```
 
 ## Usage
 
-### Start ChromeDriver
+### Basic Commands
 
-Make sure ChromeDriver is running:
-
-```bash
-chromedriver --port=9515
-```
-
-### Fetch Pending Jobs
-
-List pending jobs without processing:
-
+#### List Pending Jobs
+View queued jobs without processing:
 ```bash
 cargo run -- fetch --limit 10
 ```
 
-### Process Jobs
-
-Fetch and process jobs:
-
+#### Process Jobs
+Fetch and process property records:
 ```bash
-cargo run -- process --limit 10 --concurrent 1 --headless --rate-limit 100
+cargo run -- process --limit 10 --concurrent 2 --headless true --rate-limit 100
 ```
 
-Options:
+**Options:**
 - `-l, --limit <LIMIT>`: Number of jobs to fetch (default: 10)
-- `-c, --concurrent <CONCURRENT>`: Number of concurrent scrapers (default: 1)
-- `--headless`: Run in headless mode (default: true)
-- `-r, --rate-limit <RATE_LIMIT>`: Rate limit per hour (default: 100)
+- `-c, --concurrent <CONCURRENT>`: Concurrent scraper instances (default: 1)
+- `--headless <true|false>`: Run browser in headless mode (default: true)
+- `-r, --rate-limit <RATE_LIMIT>`: Maximum requests per hour (default: 100)
 
-### Get Results
-
-Fetch results from Supabase:
-
+#### Retrieve Results
+Fetch processed results from Supabase:
 ```bash
 cargo run -- results --limit 10 --offset 0
 ```
 
-### Diretrix Enrichment Service
+### Diretrix Property Scraper
 
-The CLI now exposes a Rust microservice that enriches customer data using the
-Diretrix API. Configure the required environment variables and launch the
-service with the new `serve-enrichment` subcommand:
+Search and export property data from Diretrix:
+```bash
+cargo run -- diretrix --street "nome da rua" --street-number "123"
+```
+
+This command automatically enriches scraped properties using CPF and owner name data.
+
+### Enrichment Microservice
+
+Start the enrichment REST API service:
 
 ```bash
-export DIRETRIX_BASE_URL=https://www.diretrixconsultoria.com.br/api
+# Configure credentials in .env or export directly
+export DIRETRIX_BASE_URL=https://www.diretrixconsultoria.com.br
 export DIRETRIX_USER=your-user
 export DIRETRIX_PASS=your-pass
 
+# Launch the service
 cargo run -- serve-enrichment --addr 127.0.0.1:8080
 ```
 
-When running, send POST requests to `/enrich/person` with parallel arrays of
-search types and values:
+#### API Endpoint: `/enrich/person`
+
+Enrich person data by CPF, name, email, or phone:
 
 ```bash
 curl -X POST http://127.0.0.1:8080/enrich/person \
   -H 'Content-Type: application/json' \
   -d '{
         "search_types": ["cpf", "name", "email"],
-        "searches": ["12345678901", "Maria Joaquina", "maria@example.com"]
+        "searches": ["12345678901", "Maria Silva", "maria@example.com"]
       }'
 ```
 
-The service tries the CPF first, then falls back to email, phone, and finally
-name. When multiple candidates are returned the best match is selected via a
-cosine similarity score (> 0.5). Successful responses are returned as a
-`GetCustomerData` payload. Failures return 404 when no match is found or 502 for
-Diretrix/API issues.
+**Fallback Strategy:**
+1. Search by CPF (primary)
+2. Fallback to email
+3. Fallback to phone
+4. Fallback to name
 
-Whenever you run the `diretrix` scraping command, the CLI automatically feeds
-each scraped property into the enrichment pipeline using the `Document 1`
-field (when it resembles a CPF) and the owner name as a secondary search.
+**Matching Logic:**
+- Multiple candidates are ranked using cosine similarity
+- Best match selected if similarity score > 0.5
+- Returns `GetCustomerData` payload on success
+- Returns `404` if no match found
+- Returns `502` for API/Diretrix errors
 
-### React helper screen
+### React UI Component
 
-For quick manual tests a lightweight React component is available at
-`frontend/EnrichmentScreen.tsx`. Drop the component into your app, fill any of
-the optional fields (CPF, Name, Email, Phone) and submit; it will call the
-`/enrich/person` endpoint and render the normalised result or error messages.
+A lightweight testing interface is available at `frontend/EnrichmentScreen.tsx`:
 
-## Environment Variables
+```tsx
+import EnrichmentScreen from './frontend/EnrichmentScreen';
 
-Create a `.env` file with:
-
+// Use in your React app
+<EnrichmentScreen />
 ```
+
+Fill optional fields (CPF, Name, Email, Phone) and submit to test the enrichment endpoint with real-time results.
+
+## Configuration
+
+### Environment Variables
+
+Copy `.env.example` to `.env` and configure:
+
+#### Supabase (Required)
+```env
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_ANON_KEY=your-anon-key
 SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
 ```
 
-## Logging
+#### Diretrix Scraper
+```env
+DIRETRIX_USERNAME=your-username
+DIRETRIX_PASSWORD=your-password
+DIRETRIX_WEBDRIVER_URL=http://localhost:9515
+```
 
-Set the `RUST_LOG` environment variable to control logging level:
+#### Workbuscas API (Property Enrichment)
+```env
+WORKBUSCAS_TOKEN=your-api-token
+```
+
+#### Local Enrichment Service (Optional)
+```env
+ENRICHMENT_ENDPOINT=http://127.0.0.1:8080/enrich/person
+DIRETRIX_BASE_URL=https://www.diretrixconsultoria.com.br
+DIRETRIX_USER=your-enrichment-user
+DIRETRIX_PASS=your-enrichment-pass
+```
+
+### Logging
+
+Control log verbosity with the `RUST_LOG` environment variable:
 
 ```bash
+# Debug level (verbose)
 RUST_LOG=debug cargo run -- process
+
+# Info level (default)
+RUST_LOG=info cargo run -- process
+
+# Single module debug
+RUST_LOG=iptu_cli::scraper=debug cargo run -- process
 ```
 
 ## Testing
 
-The project includes comprehensive unit and integration tests.
+Comprehensive test suite with unit and integration tests.
 
 ### Running Tests
 
 ```bash
-# Run all tests
+# All tests
 cargo test
 
-# Run with output for debugging
+# With output (debug mode)
 cargo test -- --nocapture
 
-# Run specific test module
+# Specific module
 cargo test scraper::tests
 
-# Run integration tests only
+# Integration tests only
 cargo test --test scraper_integration_test
 
-# Run a specific test
+# Single test
 cargo test test_failure_tracker_new
 
-# Run tests with single thread (useful for debugging)
+# Sequential execution (debugging)
 cargo test -- --test-threads=1
 ```
 
 ### Test Coverage
 
-The test suite covers:
+| Component | Focus Area | Test Count |
+|-----------|-----------|------------|
+| **FailureTracker** | Cooldown & failure management | Multiple |
+| **ScraperEngine** | Core scraping functionality | Multiple |
+| **Integration** | End-to-end scenarios | 9 tests |
 
-- **FailureTracker**: Cooldown system and failure management
-  - Creation and initialization
-  - Failure/success recording
-  - Cooldown detection (2 failures in 10 minutes)
-  - Timestamp cleanup for old failures
-  - Concurrent access handling
+**Key test areas:**
+- Failure tracking and cooldown detection (2 failures in 10min)
+- Automatic timestamp cleanup for old failures
+- Concurrent access handling
+- Contributor number format validation
+- Batch processing workflows
+- Error handling and recovery scenarios
 
-- **ScraperEngine**: Core scraping functionality
-  - Configuration management
-  - Result creation and validation
-  - Error handling
-
-- **Integration Tests**: End-to-end scenarios
-  - Contributor number format validation
-  - Batch processing
-  - Concurrent operations
-  - Failure scenarios and recovery
-
-### Test Files
-
-- `src/scraper/mod.rs`: Unit tests within the module (15 tests)
-- `tests/scraper_integration_test.rs`: Integration tests (9 tests)
+**Test files:**
+- `src/scraper/mod.rs` - Unit tests (15 tests)
+- `tests/scraper_integration_test.rs` - Integration tests (9 tests)
 
 ## Database Schema
 
-The CLI expects the following Supabase tables:
+Required Supabase tables:
 
-- `iptus_list`: Queue of contributor numbers to process
-- `iptus`: Results table
-- `batches`: Batch tracking table
+### `iptus_list`
 
-## Failure Recovery System
+Job queue containing contributor numbers to process.
 
-The scraper includes an intelligent failure recovery mechanism:
+### `iptus`
 
-1. **Failure Detection**: Monitors all scraping attempts
-2. **10-Minute Window**: Tracks failures within rolling 10-minute windows
-3. **Automatic Cooldown**: After 2 failures in 10 minutes, enters 20-minute cooldown
-4. **Progress Tracking**: Shows cooldown progress every 2 minutes
-5. **Auto-Reset**: Success automatically resets all failure counters
+Processed property records and scraping results.
 
-This prevents aggressive scraping that could lead to IP bans while maintaining efficient processing.
+### `batches`
 
-### Diretrix
-        
-```bash
-cargo run -- diretrix --street "nome da rua sem o rua" --street-number "123"  
+Batch tracking for monitoring processing progress across multiple runs.
+
+## Architecture
+
+### Failure Recovery System
+
+Intelligent failure handling prevents IP bans while maintaining throughput:
+
+1. **Failure Detection**: Monitors all scraping attempts in real-time
+2. **Rolling Window**: Tracks failures within 10-minute sliding windows
+3. **Automatic Cooldown**: Triggers 20-minute pause after 2 failures in 10min
+4. **Progress Updates**: Displays cooldown status every 2 minutes
+5. **Auto-Reset**: Successful operations reset all failure counters
+
+**Benefits:**
+
+- Prevents aggressive scraping
+- Reduces risk of IP bans
+- Maintains processing efficiency
+- Self-healing on success
+
+### Project Structure
+
+```plaintext
+iptu-cli/
+├── src/
+│   ├── main.rs                    # CLI entry point
+│   ├── lib.rs                     # Library exports
+│   ├── scraper/                   # IPTU scraper module
+│   ├── diretrix_scraper/          # Diretrix property scraper
+│   ├── diretrix_enrichment/       # Person data enrichment
+│   ├── enrichment_service.rs      # REST API service
+│   └── supabase/                  # Supabase client
+├── tests/                         # Integration tests
+├── frontend/                      # React UI components
+└── Cargo.toml                     # Dependencies
+
 ```
+
+## Contributing
+
+Contributions are welcome! Please ensure:
+
+- All tests pass: `cargo test`
+- Code is formatted: `cargo fmt`
+- No linter warnings: `cargo clippy`
+
+## License
+
+[Specify your license here]
+
+## Related Documentation
+
+- [ENRICHMENT_GUIDE.md](./ENRICHMENT_GUIDE.md) - Detailed enrichment service documentation
