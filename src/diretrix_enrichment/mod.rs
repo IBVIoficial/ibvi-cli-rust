@@ -288,15 +288,21 @@ impl From<WorkbuscasResponse> for GetCustomerData {
             }
         };
 
-        let emails = wb.emails.unwrap_or_default()
+        let emails = wb
+            .emails
+            .unwrap_or_default()
             .into_iter()
-            .filter_map(|e| e.email.map(|email| CustomerEmail {
-                email,
-                ranking: None,
-            }))
+            .filter_map(|e| {
+                e.email.map(|email| CustomerEmail {
+                    email,
+                    ranking: None,
+                })
+            })
             .collect();
 
-        let phones = wb.telefones.unwrap_or_default()
+        let phones = wb
+            .telefones
+            .unwrap_or_default()
             .into_iter()
             .map(|p| CustomerPhone {
                 ddd: p.ddd,
@@ -307,7 +313,9 @@ impl From<WorkbuscasResponse> for GetCustomerData {
             })
             .collect();
 
-        let addresses = wb.enderecos.unwrap_or_default()
+        let addresses = wb
+            .enderecos
+            .unwrap_or_default()
             .into_iter()
             .map(|a| CustomerAddress {
                 street: a.logradouro,

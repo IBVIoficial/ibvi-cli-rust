@@ -26,6 +26,15 @@ Cargo.lock
 
 *.log
 .superREADME.md
-.claude.DS_Store
+.claude
+.DS_Store
 src/.DS_Store
 *.csv
+
+# Project organization folders
+logs/
+tests/
+sessions/
+docs/
+output/
+chromedriver.log
