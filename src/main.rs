@@ -1,3 +1,4 @@
+mod dbase_scraper;
 mod diretrix_enrichment;
 mod diretrix_scraper;
 mod enrichment_service;
@@ -7,9 +8,10 @@ mod supabase;
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use rand::Rng;
-use reqwest::{Client as HttpClient, StatusCode};
+use reqwest::{header::CONTENT_TYPE, Client as HttpClient, Response, StatusCode};
 use serde_json::{self, json};
 use std::collections::HashMap;
+use std::fmt;
 use std::fs::File;
 use std::io::{self, Write};
 use std::process::Command;
@@ -17,6 +19,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
+use dbase_scraper::DbaseScraper;
 use diretrix_enrichment::{GetCustomerData, WorkbuscasResponse};
 use diretrix_scraper::{DiretrixScraper, PropertyRecord};
 use enrichment_service::run_enrichment_server;
@@ -138,14 +141,14 @@ fn sanitize_document_candidate(value: &Option<String>) -> Option<String> {
         if doc.contains('X') || doc.contains('x') {
             return None;
         }
-        
+
         let digits: String = doc.chars().filter(|c| c.is_ascii_digit()).collect();
-        
+
         // Must have at least 1 digit and at most 11
         if digits.is_empty() || digits.len() > 11 {
             return None;
         }
-        
+
         // Pad with leading zeros to reach 11 characters
         Some(format!("{:0>11}", digits))
     })
@@ -296,6 +299,151 @@ fn export_diretrix_to_csv(
     Ok(())
 }
 
+#[derive(Debug)]
+enum EnrichmentParseError {
+    BodyRead {
+        status: StatusCode,
+        message: String,
+    },
+    Html {
+        status: StatusCode,
+        content_type: Option<String>,
+        snippet: String,
+        source: &'static str,
+    },
+    Json {
+        status: StatusCode,
+        message: String,
+        snippet: String,
+        source: &'static str,
+    },
+}
+
+impl fmt::Display for EnrichmentParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EnrichmentParseError::BodyRead { status, message } => {
+                write!(
+                    f,
+                    "Failed to read enrichment response body (status {}): {}",
+                    status, message
+                )
+            }
+            EnrichmentParseError::Html {
+                status,
+                content_type,
+                snippet,
+                source,
+            } => {
+                let content = content_type
+                    .as_deref()
+                    .map(|ct| ct.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                write!(
+                    f,
+                    "{} returned HTML instead of JSON (status {}, content-type {}). \
+                     This usually indicates an authentication or availability issue. \
+                     Body starts with: {}",
+                    source, status, content, snippet
+                )
+            }
+            EnrichmentParseError::Json {
+                status,
+                message,
+                snippet,
+                source,
+            } => write!(
+                f,
+                "Failed to parse {} response (status {}): {}. Body starts with: {}",
+                source, status, message, snippet
+            ),
+        }
+    }
+}
+
+async fn parse_enrichment_payload(
+    response: Response,
+    use_workbuscas: bool,
+) -> std::result::Result<Option<GetCustomerData>, EnrichmentParseError> {
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_ascii_lowercase());
+    let source = if use_workbuscas {
+        "Workbuscas API"
+    } else {
+        "local enrichment service"
+    };
+
+    let body = response
+        .text()
+        .await
+        .map_err(|e| EnrichmentParseError::BodyRead {
+            status,
+            message: e.to_string(),
+        })?;
+
+    let cleaned = body.trim().trim_start_matches('\u{feff}');
+
+    if cleaned.is_empty() {
+        return Ok(None);
+    }
+
+    let trimmed_start = cleaned.trim_start();
+    let looks_like_html = content_type
+        .as_deref()
+        .map(|ct| ct.contains("html"))
+        .unwrap_or(false)
+        || trimmed_start.starts_with('<');
+
+    if looks_like_html {
+        let snippet = trimmed_start.chars().take(160).collect::<String>();
+        return Err(EnrichmentParseError::Html {
+            status,
+            content_type,
+            snippet,
+            source,
+        });
+    }
+
+    if use_workbuscas {
+        match serde_json::from_str::<WorkbuscasResponse>(cleaned) {
+            Ok(data) => return Ok(Some(data.into())),
+            Err(primary_err) => {
+                if let Ok(as_array) = serde_json::from_str::<Vec<WorkbuscasResponse>>(cleaned) {
+                    if let Some(first) = as_array.into_iter().next() {
+                        return Ok(Some(first.into()));
+                    }
+                    return Ok(None);
+                }
+
+                let snippet = cleaned.chars().take(160).collect::<String>();
+                return Err(EnrichmentParseError::Json {
+                    status,
+                    message: primary_err.to_string(),
+                    snippet,
+                    source,
+                });
+            }
+        }
+    }
+
+    match serde_json::from_str::<GetCustomerData>(cleaned) {
+        Ok(data) => Ok(Some(data)),
+        Err(err) => {
+            let snippet = cleaned.chars().take(160).collect::<String>();
+            Err(EnrichmentParseError::Json {
+                status,
+                message: err.to_string(),
+                snippet,
+                source,
+            })
+        }
+    }
+}
+
 fn display_enrichment_result(result: &GetCustomerData) {
     println!("\n🔎 Enriched profile:");
     println!("  Name: {}", result.base.name);
@@ -398,11 +546,14 @@ async fn enrich_diretrix_records(records: &[PropertyRecord]) -> Vec<Option<GetCu
 
     // Check if using Workbuscas API or local enrichment service
     let use_workbuscas = std::env::var("WORKBUSCAS_TOKEN").is_ok();
-    
+
     let (base_url, token) = if use_workbuscas {
         let token = std::env::var("WORKBUSCAS_TOKEN")
             .unwrap_or_else(|_| "FXEniLsawoXPlTdYTbdjZAxn".to_string());
-        ("https://completa.workbuscas.com/api".to_string(), Some(token))
+        (
+            "https://completa.workbuscas.com/api".to_string(),
+            Some(token),
+        )
     } else {
         // Fallback to local enrichment service
         let endpoint = std::env::var("ENRICHMENT_ENDPOINT")
@@ -420,7 +571,7 @@ async fn enrich_diretrix_records(records: &[PropertyRecord]) -> Vec<Option<GetCu
             return vec![None; records.len()];
         }
     };
-    
+
     if use_workbuscas {
         info!("✅ Using Workbuscas API for enrichment");
     } else {
@@ -429,13 +580,16 @@ async fn enrich_diretrix_records(records: &[PropertyRecord]) -> Vec<Option<GetCu
             "search_types": ["cpf"],
             "searches": ["00000000000"],
         });
-        
+
         match client.post(&base_url).json(&test_payload).send().await {
             Ok(_) => {
                 info!("✅ Enrichment service available at {}", base_url);
             }
             Err(err) => {
-                info!("ℹ️  Enrichment service not available ({}), skipping enrichment", err);
+                info!(
+                    "ℹ️  Enrichment service not available ({}), skipping enrichment",
+                    err
+                );
                 info!("   To enable enrichment, either:");
                 info!("   1. Set WORKBUSCAS_TOKEN environment variable");
                 info!("   2. Or start local service: cargo run -- serve-enrichment --addr 127.0.0.1:8080");
@@ -445,6 +599,7 @@ async fn enrich_diretrix_records(records: &[PropertyRecord]) -> Vec<Option<GetCu
     }
 
     let mut results = Vec::with_capacity(records.len());
+    let mut workbuscas_html_response_detected = false;
 
     for record in records {
         let cpf_candidate = sanitize_document_candidate(&record.document1)
@@ -462,163 +617,207 @@ async fn enrich_diretrix_records(records: &[PropertyRecord]) -> Vec<Option<GetCu
 
         // Try CPF first if available
         let mut enrichment_result = None;
-        
+
         if let Some(cpf) = cpf_candidate.clone() {
-            let url = if use_workbuscas {
-                // Workbuscas API format
-                format!("{}?token={}&modulo=cpf&consulta={}", 
-                    base_url, 
-                    token.as_ref().unwrap(), 
-                    cpf
-                )
+            if use_workbuscas && workbuscas_html_response_detected {
+                info!(
+                    "Skipping Workbuscas CPF lookup for '{}' because the API returned HTML earlier in this run",
+                    record.owner
+                );
             } else {
-                // Local enrichment service
-                base_url.clone()
-            };
+                let url = if use_workbuscas {
+                    // Workbuscas API format
+                    format!(
+                        "{}?token={}&modulo=cpf&consulta={}",
+                        base_url,
+                        token.as_ref().unwrap(),
+                        cpf
+                    )
+                } else {
+                    // Local enrichment service
+                    base_url.clone()
+                };
 
-            let request = if use_workbuscas {
-                client.get(&url)
-            } else {
-                let payload = json!({
-                    "search_types": ["cpf"],
-                    "searches": [cpf.clone()],
-                });
-                client.post(&url).json(&payload)
-            };
+                let request = if use_workbuscas {
+                    client.get(&url)
+                } else {
+                    let payload = json!({
+                        "search_types": ["cpf"],
+                        "searches": [cpf.clone()],
+                    });
+                    client.post(&url).json(&payload)
+                };
 
-            match request.send().await {
-                Ok(response) => {
-                    if response.status() == StatusCode::NOT_FOUND {
-                        info!(
-                            "No enrichment data found for owner '{}' with CPF {}",
-                            record.owner, cpf
-                        );
-                    } else if response.status().is_success() {
-                        let parse_result = if use_workbuscas {
-                            // Try to parse as Workbuscas format first
-                            match response.json::<WorkbuscasResponse>().await {
-                                Ok(wb_response) => Ok(GetCustomerData::from(wb_response)),
-                                Err(e) => {
-                                    // Fallback to direct GetCustomerData format
-                                    Err(format!("Failed to parse Workbuscas response: {}", e))
+                match request.send().await {
+                    Ok(response) => {
+                        let status = response.status();
+
+                        if status == StatusCode::NOT_FOUND {
+                            info!(
+                                "No enrichment data found for owner '{}' with CPF {}",
+                                record.owner, cpf
+                            );
+                        } else if status.is_success() {
+                            match parse_enrichment_payload(response, use_workbuscas).await {
+                                Ok(Some(result)) => {
+                                    println!(
+                                        "\n✅ Enrichment succeeded for '{}' using CPF {}",
+                                        record.owner, cpf
+                                    );
+                                    display_enrichment_result(&result);
+                                    enrichment_result = Some(result);
+                                }
+                                Ok(None) => {
+                                    if use_workbuscas {
+                                        info!(
+                                            "Workbuscas returned an empty response for owner '{}' with CPF {}",
+                                            record.owner, cpf
+                                        );
+                                    } else {
+                                        info!(
+                                            "Local enrichment service returned an empty response for owner '{}' with CPF {}",
+                                            record.owner, cpf
+                                        );
+                                    }
+                                }
+                                Err(err @ EnrichmentParseError::Html { .. }) => {
+                                    warn!(
+                                        "Failed to parse enrichment response for '{}': {}",
+                                        record.owner, err
+                                    );
+                                    if use_workbuscas {
+                                        workbuscas_html_response_detected = true;
+                                        warn!(
+                                            "Disabling further Workbuscas requests for this run. \
+                                             Please verify your WORKBUSCAS_TOKEN and Workbuscas API availability."
+                                        );
+                                    }
+                                }
+                                Err(err) => {
+                                    warn!(
+                                        "Failed to parse enrichment response for '{}': {}",
+                                        record.owner, err
+                                    );
                                 }
                             }
                         } else {
-                            // Parse as GetCustomerData directly for local service
-                            response.json::<GetCustomerData>().await
-                                .map_err(|e| e.to_string())
-                        };
-                        
-                        match parse_result {
-                            Ok(result) => {
-                                println!(
-                                    "\n✅ Enrichment succeeded for '{}' using CPF {}",
-                                    record.owner, cpf
-                                );
-                                display_enrichment_result(&result);
-                                enrichment_result = Some(result);
-                            }
-                            Err(err) => {
-                                warn!(
-                                    "Failed to parse enrichment response for '{}': {}",
-                                    record.owner, err
-                                );
-                            }
+                            warn!(
+                                "Enrichment service error for '{}' with CPF {} (status {})",
+                                record.owner, cpf, status
+                            );
                         }
-                    } else {
+                    }
+                    Err(err) => {
                         warn!(
-                            "Enrichment service error for '{}' with CPF {} (status {})",
-                            record.owner, cpf, response.status()
+                            "Failed to call enrichment service for '{}' with CPF {}: {}",
+                            record.owner, cpf, err
                         );
                     }
-                }
-                Err(err) => {
-                    warn!(
-                        "Failed to call enrichment service for '{}' with CPF {}: {}",
-                        record.owner, cpf, err
-                    );
                 }
             }
         }
 
         // Fallback to name search if CPF enrichment failed
-        if enrichment_result.is_none() && name_candidate.is_some() {
-            let name = name_candidate.unwrap();
-            info!("Trying enrichment by name for '{}'", name);
-            
-            let url = if use_workbuscas {
-                // Workbuscas API format - URL encode the name
-                let encoded_name = urlencoding::encode(&name);
-                format!("{}?token={}&modulo=name&consulta={}", 
-                    base_url, 
-                    token.as_ref().unwrap(), 
-                    encoded_name
-                )
-            } else {
-                // Local enrichment service
-                base_url.clone()
-            };
+        if enrichment_result.is_none() {
+            if let Some(name) = name_candidate.clone() {
+                if use_workbuscas && workbuscas_html_response_detected {
+                    info!(
+                        "Skipping Workbuscas name lookup for '{}' because the API returned HTML earlier in this run",
+                        record.owner
+                    );
+                } else {
+                    info!("Trying enrichment by name for '{}'", name);
 
-            let request = if use_workbuscas {
-                client.get(&url)
-            } else {
-                let payload = json!({
-                    "search_types": ["name"],
-                    "searches": [name.clone()],
-                });
-                client.post(&url).json(&payload)
-            };
+                    let url = if use_workbuscas {
+                        // Workbuscas API format - URL encode the name
+                        let encoded_name = urlencoding::encode(&name);
+                        format!(
+                            "{}?token={}&modulo=name&consulta={}",
+                            base_url,
+                            token.as_ref().unwrap(),
+                            encoded_name
+                        )
+                    } else {
+                        // Local enrichment service
+                        base_url.clone()
+                    };
 
-            match request.send().await {
-                Ok(response) => {
-                    if response.status() == StatusCode::NOT_FOUND {
-                        info!(
-                            "No enrichment data found for owner '{}' by name search",
-                            record.owner
-                        );
-                    } else if response.status().is_success() {
-                        let parse_result = if use_workbuscas {
-                            // Try to parse as Workbuscas format first
-                            match response.json::<WorkbuscasResponse>().await {
-                                Ok(wb_response) => Ok(GetCustomerData::from(wb_response)),
-                                Err(e) => {
-                                    Err(format!("Failed to parse Workbuscas response: {}", e))
-                                }
-                            }
-                        } else {
-                            // Parse as GetCustomerData directly for local service
-                            response.json::<GetCustomerData>().await
-                                .map_err(|e| e.to_string())
-                        };
-                        
-                        match parse_result {
-                            Ok(result) => {
-                                println!(
-                                    "\n✅ Enrichment succeeded for '{}' using name search",
+                    let request = if use_workbuscas {
+                        client.get(&url)
+                    } else {
+                        let payload = json!({
+                            "search_types": ["name"],
+                            "searches": [name.clone()],
+                        });
+                        client.post(&url).json(&payload)
+                    };
+
+                    match request.send().await {
+                        Ok(response) => {
+                            let status = response.status();
+
+                            if status == StatusCode::NOT_FOUND {
+                                info!(
+                                    "No enrichment data found for owner '{}' by name search",
                                     record.owner
                                 );
-                                display_enrichment_result(&result);
-                                enrichment_result = Some(result);
-                            }
-                            Err(err) => {
+                            } else if status.is_success() {
+                                match parse_enrichment_payload(response, use_workbuscas).await {
+                                    Ok(Some(result)) => {
+                                        println!(
+                                            "\n✅ Enrichment succeeded for '{}' using name search",
+                                            record.owner
+                                        );
+                                        display_enrichment_result(&result);
+                                        enrichment_result = Some(result);
+                                    }
+                                    Ok(None) => {
+                                        if use_workbuscas {
+                                            info!(
+                                                "Workbuscas returned an empty response for owner '{}' by name search",
+                                                record.owner
+                                            );
+                                        } else {
+                                            info!(
+                                                "Local enrichment service returned an empty response for owner '{}' by name search",
+                                                record.owner
+                                            );
+                                        }
+                                    }
+                                    Err(err @ EnrichmentParseError::Html { .. }) => {
+                                        warn!(
+                                            "Failed to parse enrichment response for '{}': {}",
+                                            record.owner, err
+                                        );
+                                        if use_workbuscas {
+                                            workbuscas_html_response_detected = true;
+                                            warn!(
+                                                "Disabling further Workbuscas requests for this run. \
+                                                 Please verify your WORKBUSCAS_TOKEN and Workbuscas API availability."
+                                            );
+                                        }
+                                    }
+                                    Err(err) => {
+                                        warn!(
+                                            "Failed to parse enrichment response for '{}': {}",
+                                            record.owner, err
+                                        );
+                                    }
+                                }
+                            } else {
                                 warn!(
-                                    "Failed to parse enrichment response for '{}': {}",
-                                    record.owner, err
+                                    "Enrichment service error for '{}' by name (status {})",
+                                    record.owner, status
                                 );
                             }
                         }
-                    } else {
-                        warn!(
-                            "Enrichment service error for '{}' by name (status {})",
-                            record.owner, response.status()
-                        );
+                        Err(err) => {
+                            warn!(
+                                "Failed to call enrichment service for '{}' by name: {}",
+                                record.owner, err
+                            );
+                        }
                     }
-                }
-                Err(err) => {
-                    warn!(
-                        "Failed to call enrichment service for '{}' by name: {}",
-                        record.owner, err
-                    );
                 }
             }
         }
@@ -732,6 +931,44 @@ enum Commands {
     ServeEnrichment {
         #[arg(long, default_value = "127.0.0.1:8080")]
         addr: String,
+    },
+
+    Dbase {
+        #[arg(long)]
+        cep: Option<String>,
+
+        #[arg(long, default_value_t = 0)]
+        numero_inicio: u64,
+
+        #[arg(long, default_value_t = 999999999999999)]
+        numero_fim: u64,
+
+        #[arg(long)]
+        username: Option<String>,
+
+        #[arg(long)]
+        password: Option<String>,
+
+        #[arg(long)]
+        username2: Option<String>,
+
+        #[arg(long)]
+        password2: Option<String>,
+
+        #[arg(long)]
+        username3: Option<String>,
+
+        #[arg(long)]
+        password3: Option<String>,
+
+        #[arg(long)]
+        webdriver_url: Option<String>,
+
+        #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+        headless: bool,
+
+        #[arg(long)]
+        output: Option<String>,
     },
 }
 
@@ -1440,6 +1677,134 @@ async fn main() -> Result<()> {
 
         Commands::ServeEnrichment { addr } => {
             run_enrichment_server(&addr).await?;
+        }
+
+        Commands::Dbase {
+            cep,
+            numero_inicio,
+            numero_fim,
+            username,
+            password,
+            username2,
+            password2,
+            username3,
+            password3,
+            webdriver_url,
+            headless,
+            output,
+        } => {
+            info!("Starting DBase scraper for dbase.com.br");
+
+            // Resolve credentials from CLI args or environment variables
+            let cred1_user =
+                resolve_credential(username, "DBASE_USERNAME", "DBase username (1): ")?;
+            let cred1_pass =
+                resolve_credential(password, "DBASE_PASSWORD", "DBase password (1): ")?;
+
+            let cred2_user = username2
+                .or_else(|| std::env::var("DBASE_USERNAME_2").ok())
+                .unwrap_or_else(|| cred1_user.clone());
+            let cred2_pass = password2
+                .or_else(|| std::env::var("DBASE_PASSWORD_2").ok())
+                .unwrap_or_else(|| cred1_pass.clone());
+
+            let cred3_user = username3
+                .or_else(|| std::env::var("DBASE_USERNAME_3").ok())
+                .unwrap_or_else(|| cred1_user.clone());
+            let cred3_pass = password3
+                .or_else(|| std::env::var("DBASE_PASSWORD_3").ok())
+                .unwrap_or_else(|| cred1_pass.clone());
+
+            let credentials = vec![
+                (cred1_user.clone(), cred1_pass.clone()),
+                (cred2_user, cred2_pass),
+                (cred3_user, cred3_pass),
+                (cred1_user, cred1_pass), // Loop back to first
+            ];
+
+            let webdriver_url_val = if let Some(url) = webdriver_url.as_deref() {
+                url
+            } else if let Ok(url) = std::env::var("DBASE_WEBDRIVER_URL") {
+                Box::leak(url.into_boxed_str()) as &str
+            } else {
+                "http://localhost:9515"
+            };
+
+            // Ensure ChromeDriver is running
+            start_chromedriver()?;
+
+            // Create scraper
+            let scraper = DbaseScraper::new(credentials, webdriver_url_val, headless).await?;
+
+            // Login
+            scraper.login().await?;
+
+            // Get CEP from CLI or prompt
+            let cep_value = match cep {
+                Some(value) if !value.trim().is_empty() => value.trim().to_string(),
+                _ => prompt_non_empty("CEP (8 digits): ")?,
+            };
+
+            // Search by CEP
+            info!("Searching for CEP: {}", cep_value);
+            let records = scraper
+                .search_by_cep(&cep_value, numero_inicio, numero_fim)
+                .await?;
+
+            info!("Total records found: {}", records.len());
+
+            // Display records
+            if !records.is_empty() {
+                println!(
+                    "\n{:<20} {:<35} {:<25} {:<8} {:<20} {:<18} {:<10}",
+                    "CPF/CNPJ",
+                    "Nome/Razão Social",
+                    "Logradouro",
+                    "Número",
+                    "Complemento",
+                    "Bairro",
+                    "CEP"
+                );
+                println!("{}", "-".repeat(140));
+
+                for (idx, record) in records.iter().enumerate().take(20) {
+                    println!(
+                        "{:<20} {:<35} {:<25} {:<8} {:<20} {:<18} {:<10}",
+                        record.cpf_cnpj,
+                        record
+                            .nome_razao_social
+                            .chars()
+                            .take(35)
+                            .collect::<String>(),
+                        record.logradouro.chars().take(25).collect::<String>(),
+                        record.numero,
+                        record.complemento.chars().take(20).collect::<String>(),
+                        record.bairro.chars().take(18).collect::<String>(),
+                        record.cep
+                    );
+
+                    if idx == 19 && records.len() > 20 {
+                        println!("... and {} more records", records.len() - 20);
+                    }
+                }
+            }
+
+            // Export to CSV
+            let output_filename = output.unwrap_or_else(|| dbase_scraper::generate_csv_filename());
+
+            // Create output directory if it doesn't exist
+            if let Some(parent) = std::path::Path::new(&output_filename).parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+
+            dbase_scraper::export_to_csv(&records, &output_filename)?;
+
+            // Close browser
+            if let Err(e) = scraper.close().await {
+                warn!("Failed to close browser cleanly: {}", e);
+            }
+
+            info!("✅ DBase scraping complete!");
         }
     }
 

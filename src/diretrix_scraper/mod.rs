@@ -306,6 +306,23 @@ impl DiretrixScraper {
                 debug!("Could not navigate via menu/breadcrumb, will check page state");
             }
 
+            // Strategy 6: Direct navigation to Por Endereço URL as last resort
+            if !navigated {
+                let direct_url =
+                    format!("{}/IPTU/PorEndereco", self.base_url.trim_end_matches('/'));
+                info!("Direct navigation fallback to {}", direct_url);
+
+                match self.driver.goto(&direct_url).await {
+                    Ok(_) => {
+                        Self::wait_for_page_ready(&self.driver).await?;
+                        sleep(Duration::from_secs(3)).await;
+                    }
+                    Err(err) => {
+                        warn!("Direct navigation to Por Endereço failed: {}", err);
+                    }
+                }
+            }
+
             // Wait for navigation to complete
             Self::wait_for_page_ready(&self.driver).await?;
             sleep(Duration::from_secs(3)).await;
