@@ -1,11 +1,13 @@
 # IPTU CLI
 
-A robust command-line tool for extracting and enriching São Paulo property tax (IPTU) data with integrated web scraping, data enrichment services, and intelligent failure recovery.
+A robust command-line tool for extracting and enriching São Paulo property tax (IPTU) data with integrated web scraping, data enrichment services, intelligent failure recovery, and **fully automated DBase address scraping with reCAPTCHA solving**.
 
 ## Overview
 
 IPTU CLI is a Rust-based automation tool that:
 - Scrapes property data from São Paulo's municipal tax website
+- **Scrapes address data from DBase with automatic reCAPTCHA v2 solving**
+- **Supports pagination to extract complete datasets (250+ records)**
 - Enriches property records with owner information via Diretrix API
 - Integrates with Workbuscas API for automatic property enrichment
 - Provides a microservice for real-time data enrichment
@@ -17,9 +19,19 @@ IPTU CLI is a Rust-based automation tool that:
 ### Core Functionality
 - **Automated Job Processing**: Fetch and process property records from Supabase queues
 - **Web Scraping**: Selenium-based scraping with ChromeDriver integration
+- **DBase Scraper**: Fully automated address data extraction with reCAPTCHA solving
 - **Batch Management**: Track processing progress across multiple batches
 - **Concurrent Processing**: Configurable parallel scraper instances
 - **Rate Limiting**: Built-in protection against API/website throttling
+
+### DBase Scraper (NEW! 🚀)
+- **Automatic reCAPTCHA v2 Solving**: Integrates with 2Captcha API for hands-free operation
+- **Session Persistence**: Saves login cookies to avoid repeated CAPTCHA challenges
+- **Multi-Credential Fallback**: Supports up to 3 accounts with automatic rotation
+- **Full Pagination Support**: Extracts all pages automatically (tested with 251 records)
+- **CEP-Based Search**: Search by Brazilian postal code (CEP) with optional number ranges
+- **CSV Export**: Automatic export of scraped data with timestamps
+- **Zero Manual Intervention**: Completely automated workflow from login to export
 
 ### Intelligent Failure Recovery
 - Tracks failures within rolling 10-minute windows
@@ -93,6 +105,63 @@ Fetch processed results from Supabase:
 ```bash
 cargo run -- results --limit 10 --offset 0
 ```
+
+### DBase Address Scraper
+
+Extract address data from DBase by CEP (Brazilian postal code):
+
+**Basic Usage:**
+```bash
+# Search by CEP
+cargo run -- dbase --cep 01455-040
+
+# Search with number range
+cargo run -- dbase --cep 01455-040 --numero-inicio 100 --numero-fim 500
+```
+
+**Advanced Options:**
+```bash
+# Specify custom credentials
+cargo run -- dbase --cep 05676-120 \
+  --username "your-username" \
+  --password "your-password"
+
+# Use custom WebDriver URL
+cargo run -- dbase --cep 01455-040 \
+  --webdriver-url "http://localhost:9515"
+
+# Headless mode (default)
+cargo run -- dbase --cep 01455-040 --headless true
+
+# Specify output file
+cargo run -- dbase --cep 01455-040 \
+  --output "custom_output.csv"
+```
+
+**How It Works:**
+
+1. **Automatic Login**: Uses credentials from `.env` or CLI arguments
+2. **reCAPTCHA Solving**: 
+   - First tries to use saved session (no CAPTCHA)
+   - If session expired, automatically solves reCAPTCHA via 2Captcha API
+   - Solution injected via JavaScript (2-60 second solve time)
+3. **Search Execution**: Fills CEP search form and clicks "Pesquisar" automatically
+4. **Pagination**: Detects and clicks through all result pages (» button)
+5. **Data Extraction**: Extracts CPF/CNPJ, name, address, complement, neighborhood, and CEP
+6. **CSV Export**: Saves to `output/dbase_scraped_YYYYMMDD_HHMMSS.csv`
+
+**Output Format:**
+```csv
+cpf_cnpj,nome_razao_social,logradouro,numero,complemento,bairro,cep
+61.486.650/0001-83,DIAGNOSTICOS DA AMERICA S/A,RUA SERIDó,0,,JARDIM EUROPA,01455040
+521.656.718-68,VINICIUS LIMA FERNANDES,"R SERIDO, 00050, AP 101",0,,JD EUROPA,01455040
+```
+
+**Performance:**
+- **Tested**: 251 records extracted across 13 pages
+- **CAPTCHA Solve Time**: 2-60 seconds (avg. 30s)
+- **Pagination Speed**: ~2 seconds per page
+- **Total Time**: ~2-3 minutes for 251 records (including login)
 
 ### Diretrix Property Scraper
 
@@ -168,6 +237,31 @@ SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_ANON_KEY=your-anon-key
 SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
 ```
+
+#### DBase Scraper (Required for DBase scraping)
+```env
+# Primary credentials
+DBASE_USERNAME=your-username
+DBASE_PASSWORD=your-password
+
+# Fallback credentials (optional but recommended)
+DBASE_USERNAME_2=fallback-username
+DBASE_PASSWORD_2=fallback-password
+DBASE_USERNAME_3=fallback-username-3
+DBASE_PASSWORD_3=fallback-password-3
+
+# 2Captcha API key for automatic reCAPTCHA solving
+TWOCAPTCHA_API_KEY=your-2captcha-api-key
+
+# WebDriver URL (optional, defaults to localhost:9515)
+DBASE_WEBDRIVER_URL=http://localhost:9515
+```
+
+**Get 2Captcha API Key:**
+1. Sign up at https://2captcha.com
+2. Add funds (~$3 for 1000 CAPTCHAs)
+3. Copy your API key from dashboard
+4. Cost: ~$0.003 per CAPTCHA solve
 
 #### Diretrix Scraper
 ```env
@@ -293,14 +387,21 @@ iptu-cli/
 │   ├── main.rs                    # CLI entry point
 │   ├── lib.rs                     # Library exports
 │   ├── scraper/                   # IPTU scraper module
+│   ├── dbase_scraper/             # DBase address scraper (NEW!)
+│   │   ├── mod.rs                 # Main scraper logic
+│   │   ├── captcha_solver.rs     # 2Captcha integration
+│   │   └── session_manager.rs    # Session persistence
 │   ├── diretrix_scraper/          # Diretrix property scraper
 │   ├── diretrix_enrichment/       # Person data enrichment
 │   ├── enrichment_service.rs      # REST API service
 │   └── supabase/                  # Supabase client
+├── output/                        # CSV export files (gitignored)
+├── sessions/                      # Session cookies (gitignored)
+├── logs/                          # Log files (gitignored)
+├── docs/                          # Documentation (gitignored)
 ├── tests/                         # Integration tests
 ├── frontend/                      # React UI components
 └── Cargo.toml                     # Dependencies
-
 ```
 
 ## Contributing
@@ -317,4 +418,89 @@ Contributions are welcome! Please ensure:
 
 ## Related Documentation
 
-- [ENRICHMENT_GUIDE.md](./ENRICHMENT_GUIDE.md) - Detailed enrichment service documentation
+- **DBase Scraper Documentation** (in `docs/` folder):
+  - `DBASE_USAGE.md` - Comprehensive usage guide
+  - `RECAPTCHA_AUTOMATION.md` - reCAPTCHA solving strategies
+  - `DBASE_IMPLEMENTATION_SUMMARY.md` - Technical implementation details
+- **General Documentation**:
+  - `ENRICHMENT_GUIDE.md` - Detailed enrichment service documentation
+  - `CLAUDE.md` - Development commands and architecture guide
+
+## Quick Start: DBase Scraper
+
+**1. Set up environment:**
+```bash
+# Copy example config
+cp .env.example .env
+
+# Edit .env and add:
+# - DBASE_USERNAME, DBASE_PASSWORD
+# - TWOCAPTCHA_API_KEY (get from https://2captcha.com)
+```
+
+**2. Start ChromeDriver:**
+```bash
+./start.chromedriver.sh
+```
+
+**3. Run your first scrape:**
+```bash
+cargo run -- dbase --cep 01455-040
+```
+
+**4. Check results:**
+```bash
+ls -lh output/dbase_scraped_*.csv
+cat output/dbase_scraped_*.csv | head
+```
+
+**Expected Output:**
+- Login with reCAPTCHA solving: ~30-60 seconds
+- Data extraction with pagination: ~1-2 minutes
+- Total records: 20-250+ depending on CEP
+- Output: `output/dbase_scraped_YYYYMMDD_HHMMSS.csv`
+
+## Troubleshooting
+
+### DBase Scraper Issues
+
+**Problem: "Timeout waiting for search results"**
+- **Cause**: CEP may not exist in database or wrong format
+- **Solution**: Verify CEP format (XXXXX-XXX) and try different CEP
+
+**Problem: "All login attempts failed"**
+- **Cause**: Invalid credentials or session issues
+- **Solution**: 
+  1. Verify credentials in `.env`
+  2. Delete `sessions/dbase_session.json`
+  3. Try again with fresh session
+
+**Problem: "2Captcha API error"**
+- **Cause**: Invalid API key or insufficient balance
+- **Solution**:
+  1. Check API key is correct
+  2. Verify balance at https://2captcha.com
+  3. Top up if needed (~$3 for 1000 solves)
+
+**Problem: "Only 20 records extracted (missing pagination)"**
+- **Cause**: Pagination detection failed (fixed in latest version)
+- **Solution**: Update to latest version with JavaScript pagination detection
+
+### General Troubleshooting
+
+**ChromeDriver not starting:**
+```bash
+# Kill existing instances
+pkill chromedriver
+
+# Restart
+./start.chromedriver.sh
+```
+
+**Session expired issues:**
+```bash
+# Clear saved sessions
+rm -rf sessions/
+
+# Scraper will create fresh login
+```
